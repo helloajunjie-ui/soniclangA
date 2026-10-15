@@ -1,0 +1,25 @@
+# AgentHub local data (JSON store, SQLite db, vault machine key, audit log)
+backend/data/
+backend/data-*/
+backend/*.exe
+
+# SQLite database + WAL sidecars (runtime data, never commit)
+backend/data*/agenthub.db
+backend/data*/agenthub.db-shm
+backend/data*/agenthub.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+
+# Frontend build output
+frontend/dist/
+node_modules/
+
+# OS / editor
+.DS_Store
+*.swp

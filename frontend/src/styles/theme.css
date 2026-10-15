@@ -1,0 +1,117 @@
+:root {
+  --ah-bg: #f5f7fa;
+  --ah-bg-elev: #ffffff;
+  --ah-bg-sunken: #eef1f6;
+  --ah-border: #e2e6ee;
+  --ah-text: #1f2430;
+  --ah-text-dim: #6b7280;
+  --ah-primary: #3b82f6;
+  --ah-primary-soft: rgba(59, 130, 246, 0.12);
+  --ah-danger: #ef4444;
+  --ah-success: #22c55e;
+  --ah-warn: #f59e0b;
+  --ah-radius: 10px;
+  --ah-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+html.dark {
+  --ah-bg: #14161c;
+  --ah-bg-elev: #1c1f27;
+  --ah-bg-sunken: #0f1116;
+  --ah-border: #2a2f3a;
+  --ah-text: #e6e9ef;
+  --ah-text-dim: #939bab;
+  --ah-primary: #60a5fa;
+  --ah-primary-soft: rgba(96, 165, 250, 0.16);
+  --ah-danger: #f87171;
+  --ah-success: #4ade80;
+  --ah-warn: #fbbf24;
+  --ah-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--ah-bg);
+  color: var(--ah-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+}
+
+/* Element Plus dark mode needs the html.dark class, which applyTheme sets. */
+html.dark .el-card,
+html.dark .el-dialog,
+html.dark .el-drawer,
+html.dark .el-message-box {
+  --el-bg-color: var(--ah-bg-elev);
+  --el-bg-color-overlay: var(--ah-bg-elev);
+  --el-border-color: var(--ah-border);
+  --el-text-color-primary: var(--ah-text);
+  --el-text-color-regular: var(--ah-text-dim);
+}
+
+.page {
+  padding: 18px 22px;
+  height: 100%;
+  overflow: auto;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 12px;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.page-sub {
+  color: var(--ah-text-dim);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.empty {
+  color: var(--ah-text-dim);
+  text-align: center;
+  padding: 48px 12px;
+}
+
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #fff;
+  font-weight: 500;
+}
+
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ah-text-dim);
+  margin: 14px 0 8px;
+  letter-spacing: 0.03em;
+}
