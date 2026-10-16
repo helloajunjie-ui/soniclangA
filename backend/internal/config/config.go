@@ -44,7 +44,11 @@ type Settings struct {
 	MemoryAutoExtract bool   `json:"memoryAutoExtract"`
 	DefaultRoleId     string `json:"defaultRoleId"`
 	DefaultProviderId string `json:"defaultProviderId"`
-	Theme             string `json:"theme"`
+	// DefaultModel is the model used when neither the role nor the request
+	// specifies one. Keeps "service provider configured = usable" true for a
+	// zero-config user: every role falls back to the default provider's model.
+	DefaultModel string `json:"defaultModel"`
+	Theme        string `json:"theme"`
 	// StorageDriver selects the persistence backend: "sqlite" (default,
 	// modernc.org/sqlite, no CGO) or "json" (flat files). See DESIGN §7.1.
 	StorageDriver string `json:"storageDriver"`
@@ -63,6 +67,11 @@ type Config struct {
 
 	mu           sync.RWMutex
 	settingsPath string
+	// settingsStore persists the settings document inside the same database as
+	// every other namespace. settings.json is only the one-time migration source
+	// for a pre-database install; after the first successful save it is renamed
+	// to settings.json.bak so there is never a second source of truth.
+	settingsStore storage.Store
 	// overrides records flags the user passed explicitly. loadSettings() must
 	// re-apply them: a missing settings.json is seeded from Defaults(), which
 	// would otherwise silently discard the CLI value (a "dead" flag).
@@ -82,6 +91,7 @@ func Defaults() Settings {
 		MemoryAutoExtract: true,
 		DefaultRoleId:     "general",
 		DefaultProviderId: "",
+		DefaultModel:      "",
 		Theme:             "system",
 		StorageDriver:     storage.DriverSQLite,
 	}
@@ -115,32 +125,48 @@ func Parse() (*Config, error) {
 	return c, nil
 }
 
-// Init creates the data directory and loads settings.json.
+// Init creates the data directory and loads the settings document. Settings are
+// persisted through the same Store (sqlite by default) as every other module —
+// a single database, no stray settings.json to chase. The json file survives
+// only as the one-time migration source for an older install.
 func (c *Config) Init() error {
 	if err := os.MkdirAll(c.DataDir, 0o755); err != nil {
 		return err
 	}
 	c.settingsPath = filepath.Join(c.DataDir, "settings.json")
+	// Open the settings namespace with the same driver as the rest of the app
+	// (flag or default sqlite). A fallback to the json driver inside Open is fine
+	// here; only a hard failure is fatal.
+	st, _ := storage.Open(c.DataDir, "settings", c.SubDir("settings"), c.Settings.StorageDriver)
+	c.settingsStore = st
 	return c.loadSettings()
 }
 
 func (c *Config) loadSettings() error {
-	data, err := os.ReadFile(c.settingsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.Settings = Defaults()
-			c.applyOverrides()
-			return c.SaveSettings()
-		}
-		return err
-	}
+	// Primary source: the settings document inside the store.
 	var s Settings
-	if err := json.Unmarshal(data, &s); err != nil {
-		return err
+	if err := c.settingsStore.Load("settings", &s); err == nil {
+		c.Settings = mergeDefaults(s)
+		c.applyOverrides()
+		return nil
 	}
-	c.Settings = mergeDefaults(s)
+	// Legacy source: settings.json from a pre-database install. Import it once,
+	// persist it into the store, then decommission the file so the database
+	// becomes the single source of truth.
+	if data, err := os.ReadFile(c.settingsPath); err == nil && len(data) > 0 {
+		if err := json.Unmarshal(data, &s); err == nil {
+			c.Settings = mergeDefaults(s)
+			c.applyOverrides()
+			if err := c.SaveSettings(); err == nil {
+				_ = os.Rename(c.settingsPath, c.settingsPath+".bak")
+			}
+			return nil
+		}
+	}
+	// Nothing anywhere: seed from defaults.
+	c.Settings = Defaults()
 	c.applyOverrides()
-	return nil
+	return c.SaveSettings()
 }
 
 // applyOverrides re-applies explicitly-passed CLI flags on top of the loaded
@@ -206,6 +232,7 @@ type SettingsPatch struct {
 	MemoryAutoExtract *bool           `json:"memoryAutoExtract"`
 	DefaultRoleId     *string         `json:"defaultRoleId"`
 	DefaultProviderId *string         `json:"defaultProviderId"`
+	DefaultModel      *string         `json:"defaultModel"`
 	Theme             *string         `json:"theme"`
 	StorageDriver     *string         `json:"storageDriver"`
 	DisabledModules   *[]string       `json:"disabledModules"`
@@ -260,6 +287,9 @@ func (p SettingsPatch) Apply(cur Settings) Settings {
 	if p.DefaultProviderId != nil {
 		cur.DefaultProviderId = *p.DefaultProviderId
 	}
+	if p.DefaultModel != nil {
+		cur.DefaultModel = *p.DefaultModel
+	}
 	if p.Theme != nil {
 		cur.Theme = *p.Theme
 	}
@@ -290,19 +320,15 @@ func (c *Config) UpdateSettings(mutate func(*Settings)) error {
 	return c.SaveSettings()
 }
 
-// SaveSettings persists the current Settings atomically.
+// SaveSettings persists the current Settings into the settings namespace of the
+// store. A nil store (before Init) is a no-op rather than an error.
 func (c *Config) SaveSettings() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	data, err := json.MarshalIndent(c.Settings, "", "  ")
-	if err != nil {
-		return err
+	if c.settingsStore == nil {
+		return nil
 	}
-	tmp := c.settingsPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, c.settingsPath)
+	return c.settingsStore.Save("settings", c.Settings)
 }
 
 // SubDir returns (and ensures) a subdirectory under the data directory.

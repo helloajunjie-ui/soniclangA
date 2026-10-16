@@ -205,48 +205,57 @@ onMounted(refreshRoles)
             </el-button>
           </div>
         </el-form-item>
-        <el-form-item label="缺失策略">
-          <el-select v-model="editing.missingVarPolicy" style="width: 180px">
-            <el-option label="skip · 保留占位符" value="skip" />
-            <el-option label="ask · 追问补齐" value="ask" />
-            <el-option label="error · 直接报错" value="error" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="服务商">
-          <el-select v-model="editing.providerId" clearable style="width: 180px" @change="onProviderChange">
-            <el-option
-              v-for="p in store.providers"
-              :key="p.id"
-              :label="p.enabled === false ? p.name + '（已停用）' : p.name"
-              :value="p.id"
-              :disabled="p.enabled === false"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="模型">
-          <el-select
-            v-model="editing.model"
-            clearable
-            filterable
-            :disabled="!editing.providerId"
-            :placeholder="editing.providerId ? '在该服务商的模型中选择' : '请先选服务商'"
-            style="width: 260px"
-          >
-            <el-option v-for="o in modelChoices" :key="o.value" :label="o.label" :value="o.value" />
-          </el-select>
-          <span v-if="editing.providerId && !modelChoices.length" class="field-hint">
-            该服务商还没有模型目录，去服务商页「刷新」
-          </span>
-        </el-form-item>
-        <el-form-item label="绑定技能">
-          <el-select v-model="editing.skills" multiple style="width: 100%">
-            <el-option v-for="s in store.skills" :key="s.id" :label="s.name" :value="s.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="温度">
-          <el-slider v-model="editing.temperature" :min="0" :max="2" :step="0.1" style="width: 200px" />
-        </el-form-item>
       </el-form>
+
+      <!-- 服务商 / 模型 / 采样参数是技术内务：普通用户不碰，用系统最优默认即可。
+           高级用户需要精确控制时才展开。 -->
+      <el-collapse v-if="editing" class="adv-collapse">
+        <el-collapse-item title="高级参数">
+          <el-form label-width="86px" size="small">
+            <el-form-item label="缺失策略">
+              <el-select v-model="editing.missingVarPolicy" style="width: 180px">
+                <el-option label="skip · 保留占位符" value="skip" />
+                <el-option label="ask · 追问补齐" value="ask" />
+                <el-option label="error · 直接报错" value="error" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="服务商">
+              <el-select v-model="editing.providerId" clearable style="width: 180px" @change="onProviderChange">
+                <el-option
+                  v-for="p in store.providers"
+                  :key="p.id"
+                  :label="p.enabled === false ? p.name + '（已停用）' : p.name"
+                  :value="p.id"
+                  :disabled="p.enabled === false"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="模型">
+              <el-select
+                v-model="editing.model"
+                clearable
+                filterable
+                :disabled="!editing.providerId"
+                :placeholder="editing.providerId ? '在该服务商的模型中选择' : '请先选服务商'"
+                style="width: 260px"
+              >
+                <el-option v-for="o in modelChoices" :key="o.value" :label="o.label" :value="o.value" />
+              </el-select>
+              <span v-if="editing.providerId && !modelChoices.length" class="field-hint">
+                该服务商还没有模型目录，去服务商页「刷新」
+              </span>
+            </el-form-item>
+            <el-form-item label="绑定技能">
+              <el-select v-model="editing.skills" multiple style="width: 100%">
+                <el-option v-for="s in store.skills" :key="s.id" :label="s.name" :value="s.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="温度">
+              <el-slider v-model="editing.temperature" :min="0" :max="2" :step="0.1" style="width: 200px" />
+            </el-form-item>
+          </el-form>
+        </el-collapse-item>
+      </el-collapse>
 
       <el-collapse v-if="preview">
         <el-collapse-item title="渲染预览">
@@ -296,6 +305,9 @@ onMounted(refreshRoles)
   margin-left: 8px;
   font-size: 11.5px;
   color: var(--ah-text-dim);
+}
+.adv-collapse {
+  margin-top: 8px;
 }
 .var-row {
   display: flex;

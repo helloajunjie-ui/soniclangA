@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // openAIAdapter speaks the OpenAI-compatible /chat/completions, /embeddings and
@@ -282,6 +283,156 @@ func (a *openAIAdapter) Embeddings(ctx context.Context, model string, texts []st
 	return embs, nil
 }
 
+// ---- Image generation (OpenAI-compatible /images/generations) ----
+
+func (a *openAIAdapter) GenerateImage(ctx context.Context, model, prompt string, opts ImageOpts) (*ImageResult, error) {
+	// OpenAI-compatible image generation. Aggregation layers (ocoolai-style) are
+	// picky: they key on User-Agent and expect vendor-specific fields
+	// (output_format/background) for the gpt-image family, and only return the
+	// body after a long (25-35s) generation. AQBOT sends a branded UA and these
+	// fields; we mirror that so the response actually comes back instead of the
+	// upstream closing the connection after billing.
+	l := strings.ToLower(model)
+	base := strings.ToLower(a.entity.BaseURL)
+	isARK := strings.Contains(base, "ark.cn-beijing.volces.com") || strings.Contains(base, "volces.com")
+	body := map[string]interface{}{"model": model, "prompt": prompt}
+	n := opts.N
+	if n < 1 {
+		n = 1
+	}
+	body["n"] = n
+	if opts.Size != "" {
+		body["size"] = opts.Size
+	}
+	if opts.Quality != "" {
+		body["quality"] = opts.Quality
+	}
+	if isARK {
+		// Volcengine Ark (Doubao) images: no output_format; it wants
+		// response_format=url + watermark, and size like "2K"/"4K"/"2048x2048".
+		body["response_format"] = "url"
+		body["watermark"] = true
+	} else if !strings.Contains(l, "dall") {
+		// gpt-image family takes output_format/background; DALL·E must not receive them.
+		of := opts.OutputFormat
+		if of == "" {
+			of = "png"
+		}
+		body["output_format"] = of
+		if opts.Background != "" {
+			body["background"] = opts.Background
+		}
+	}
+	// Image-to-image: pass the reference picture(s) through. Single URL goes as
+	// a string; the multi-reference form (e.g. seedream 4.0 img2img) as an array.
+	if len(opts.Images) > 0 {
+		body["image"] = opts.Images
+	} else if opts.Image != "" {
+		body["image"] = opts.Image
+	}
+	payload, _ := json.Marshal(body)
+	url := strings.TrimRight(a.entity.BaseURL, "/") + "/images/generations"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.firstSecret())
+	req.Header.Set("User-Agent", "AQBot-compat/1.0")
+	// Image generation routinely takes 25-35s upstream; do not cut it short.
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("image upstream %d: %s", resp.StatusCode, string(b))
+	}
+	var out struct {
+		Data []struct {
+			URL      string `json:"url"`
+			B64JSON  string `json:"b64_json"`
+			Revised  string `json:"revised_prompt"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if len(out.Data) == 0 {
+		return nil, fmt.Errorf("image upstream: empty data")
+	}
+	d := out.Data[0]
+	res := &ImageResult{URL: d.URL, B64: d.B64JSON, Model: model, Prompt: prompt}
+	if len(out.Data) > 1 {
+		urls := make([]string, 0, len(out.Data))
+		for _, it := range out.Data {
+			if it.URL != "" {
+				urls = append(urls, it.URL)
+			}
+		}
+		if len(urls) > 0 {
+			res.Images = urls
+		}
+	}
+	return res, nil
+}
+
+// ---- Video generation (OpenAI-compatible /videos/generations, async task) ----
+
+func (a *openAIAdapter) GenerateVideo(ctx context.Context, model, prompt string) (*VideoResult, error) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"model":  model,
+		"prompt": prompt,
+	})
+	url := strings.TrimRight(a.entity.BaseURL, "/") + "/videos/generations"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.firstSecret())
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("video upstream %d: %s", resp.StatusCode, string(b))
+	}
+	var out struct {
+		Data []struct {
+			URL string `json:"url"`
+		} `json:"data"`
+		TaskID string `json:"task_id"`
+		Task   string `json:"task"`
+		ID     string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	res := &VideoResult{Model: model, Prompt: prompt}
+	if len(out.Data) > 0 && out.Data[0].URL != "" {
+		res.URL = out.Data[0].URL
+	}
+	if res.URL == "" {
+		res.Task = out.TaskID
+		if res.Task == "" {
+			res.Task = out.Task
+		}
+		if res.Task == "" {
+			res.Task = out.ID
+		}
+	}
+	if res.URL == "" && res.Task == "" {
+		return nil, fmt.Errorf("video upstream: no url or task id in response")
+	}
+	return res, nil
+}
+
 // ---- Models ----
 
 func (a *openAIAdapter) Models(ctx context.Context) ([]ModelInfo, error) {
@@ -311,9 +462,37 @@ func (a *openAIAdapter) Models(ctx context.Context) ([]ModelInfo, error) {
 	}
 	infos := make([]ModelInfo, 0, len(out.Data))
 	for _, d := range out.Data {
-		infos = append(infos, ModelInfo{ID: d.ID, Name: d.ID, Capabilities: ModelCaps{Chat: true}})
+		infos = append(infos, ModelInfo{ID: d.ID, Name: d.ID, Capabilities: detectOpenAICaps(d.ID)})
 	}
 	return infos, nil
+}
+
+// detectOpenAICaps infers a model's capabilities from its id when the /models
+// endpoint returns nothing but ids (the usual case for OpenAI-compatible
+// vendors). The user should not have to tell us "this one is multimodal, that
+// one reasons": the runtime derives it, so a vision-capable image in chat just
+// works and a reasoning model surfaces its thinking without any config.
+func detectOpenAICaps(id string) ModelCaps {
+	caps := ModelCaps{Chat: true}
+	l := strings.ToLower(id)
+	// Multimodal / vision-capable: 4o and 4-vision (OpenAI), vision / vl (Qwen,
+	// InternVL, CogVLM, MiniCPM-V, glm-4v), omm / 1.5 vision, gemini-pro-vision.
+	if strings.Contains(l, "4o") || strings.Contains(l, "vision") ||
+		strings.Contains(l, "-vl") || strings.Contains(l, "4v") ||
+		strings.Contains(l, "glm-4v") || strings.Contains(l, "omm") ||
+		strings.Contains(l, "internvl") || strings.Contains(l, "minicpm-v") {
+		caps.Vision = true
+	}
+	// Reasoning-capable: o-series (o1/o3/o4), deepseek-reasoner, r1 / deepseek-v4
+	// (reasoning-flash), qwen-thinking, kimi-k2-thinking, thinking / reasoner / sonnet-o1.
+	if strings.Contains(l, "reasoner") || strings.Contains(l, "reasoning") ||
+		strings.Contains(l, "thinking") || strings.Contains(l, "o1-") ||
+		strings.Contains(l, "o3") || strings.Contains(l, "o4") ||
+		strings.Contains(l, "-r1") || strings.Contains(l, "r1-") ||
+		strings.Contains(l, "deepseek-v4") || strings.Contains(l, "k2-thinking") {
+		caps.Reasoning = true
+	}
+	return caps
 }
 
 // ---- request construction ----
@@ -348,14 +527,24 @@ type oaFuncSpec struct {
 }
 
 type oaChatRequest struct {
-	Model         string                 `json:"model"`
-	Messages      []oaMessage            `json:"messages"`
-	Stream        bool                   `json:"stream"`
-	Temperature   *float64               `json:"temperature,omitempty"`
-	MaxTokens     int                    `json:"max_tokens,omitempty"`
-	TopP          *float64               `json:"top_p,omitempty"`
-	Tools         []oaTool               `json:"tools,omitempty"`
-	StreamOptions map[string]interface{} `json:"stream_options,omitempty"`
+	Model           string                 `json:"model"`
+	Messages        []oaMessage            `json:"messages"`
+	Stream          bool                   `json:"stream"`
+	Temperature     *float64               `json:"temperature,omitempty"`
+	MaxTokens       int                    `json:"max_tokens,omitempty"`
+	TopP            *float64               `json:"top_p,omitempty"`
+	Tools           []oaTool               `json:"tools,omitempty"`
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
+	Thinking        *oaThinking            `json:"thinking,omitempty"`
+	StreamOptions   map[string]interface{} `json:"stream_options,omitempty"`
+}
+
+// oaThinking is DeepSeek's reasoning control: type enabled|disabled plus an
+// optional token budget. DeepSeek has no low/high reasoning_effort, so the
+// strength selector is translated into budget_tokens instead.
+type oaThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens *int   `json:"budget_tokens,omitempty"`
 }
 
 func buildChatRequest(messages []Message, opts CallOptions) oaChatRequest {
@@ -371,6 +560,38 @@ func buildChatRequest(messages []Message, opts CallOptions) oaChatRequest {
 	if opts.TopP != 0 {
 		p := opts.TopP
 		out.TopP = &p
+	}
+	// Reasoning strength is a single selector (auto|off|light|deep) that each
+	// model family translates into its own native control. The selector is only
+	// applied when the model is actually reasoning-capable: sending a DeepSeek
+	// `thinking` field to a non-reasoning model (e.g. deepseek-flash) makes the
+	// upstream hang instead of answering — the costliest possible failure for a
+	// strength knob. detectOpenAICaps flags reasoning models; it is the same
+	// inference used to surface thinking in the first place.
+	if opts.ReasoningEffort != "" && opts.ReasoningEffort != "auto" && detectOpenAICaps(opts.Model).Reasoning {
+		l := strings.ToLower(opts.Model)
+		switch {
+		case strings.Contains(l, "deepseek"):
+			t := &oaThinking{Type: "enabled"}
+			switch opts.ReasoningEffort {
+			case "off":
+				t.Type = "disabled"
+			case "light":
+				b := 2048
+				t.BudgetTokens = &b
+			case "deep":
+				b := 8192
+				t.BudgetTokens = &b
+			}
+			out.Thinking = t
+		case strings.Contains(l, "o1-") || strings.Contains(l, "o3") || strings.Contains(l, "o4"):
+			switch opts.ReasoningEffort {
+			case "light":
+				out.ReasoningEffort = "low"
+			case "deep":
+				out.ReasoningEffort = "high"
+			}
+		}
 	}
 	for _, m := range messages {
 		om := oaMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}

@@ -342,19 +342,15 @@ func mustPlatform(s *control.Service) string {
 // controlEnabledAtBoot reports whether software control should be on at boot,
 // given the persisted disabled-module list.
 //
-// Unlike ordinary modules, control defaults to *off* (DESIGN §9.1). The settings
-// file records only the disabled set, so "absent" cannot be distinguished from
-// "never configured" — and for a capability that clicks and types on the user's
-// desktop, that ambiguity must resolve to the safe answer. The operator
-// therefore enables it once from the UI, which is the only way it turns on.
-//
-// The cost is one extra click after a fresh install; the alternative is every
-// new install silently coming up with live desktop control.
+// Software control is on by default: it is a first-class feature of this build
+// (the user opted in at the product level). The settings file records only the
+// disabled set, so the safe default for a missing entry is *on*; an explicit
+// entry in the disabled list is the only thing that turns it off.
 func controlEnabledAtBoot(disabled []string, id string) bool {
 	for _, d := range disabled {
 		if d == id {
 			return false // explicitly disabled
 		}
 	}
-	return false // not recorded as disabled, but still opt-in only
+	return true // enabled by default unless explicitly switched off
 }

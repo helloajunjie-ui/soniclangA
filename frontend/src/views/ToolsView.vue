@@ -13,6 +13,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api/client'
+import ControlView from './ControlView.vue'
 
 const SOURCE_LABEL: Record<string, string> = {
   builtin: '内置',
@@ -472,6 +473,11 @@ async function doCall() {
           </el-table-column>
           <el-table-column prop="description" label="描述" min-width="260" show-overflow-tooltip />
         </el-table>
+      </el-tab-pane>
+
+      <!-- 软件控制：让代理替你在本机软件里做事（默认开启） -->
+      <el-tab-pane label="软件控制" name="control">
+        <ControlView />
       </el-tab-pane>
     </el-tabs>
 

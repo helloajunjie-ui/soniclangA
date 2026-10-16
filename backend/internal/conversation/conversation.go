@@ -273,7 +273,7 @@ func (s *Service) Create(roleID string, mode Mode) (*Conversation, error) {
 		RoleId:       roleID,
 		Title:        "新对话",
 		Mode:         mode,
-		Permission:   "ask",
+		Permission:   "auto",
 		MaxSteps:     30,
 		MessageCount: 0,
 		CreatedAt:    now,

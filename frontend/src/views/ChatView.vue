@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, ApiError, streamChat } from '@/api/client'
@@ -21,7 +21,8 @@ const roleVars = ref<Record<string, string>>({})
 // It starts collapsed so the conversation owns the view.
 const showRight = ref(false)
 const mode = ref('chat')
-const permission = ref('ask')
+const permission = ref('auto')
+const reasoning = ref('auto')
 const scrollBox = ref<HTMLElement>()
 let stopStream: (() => void) | null = null
 
@@ -113,6 +114,7 @@ async function loadMessages(id: string) {
     id: m.id,
     role: m.role,
     content: m.content,
+    time: m.time || m.createdAt || (m.id ? String(m.id).slice(0, 5) : ''),
   }))
   const conv = store.conversations.find((c) => c.id === id)
   if (conv?.mode) mode.value = conv.mode
@@ -123,7 +125,8 @@ async function loadMessages(id: string) {
 async function newConversation() {
   stopStream?.()
   try {
-    const c = await api.conversationCreate('', roleVars.value, mode.value)
+    // mode is decided by the AI at runtime, not handed to the user.
+    const c = await api.conversationCreate('', roleVars.value, 'chat')
     convId.value = c.id
     messages.value = []
     roleVars.value = {}
@@ -131,17 +134,6 @@ async function newConversation() {
     router.replace(`/chat/${c.id}`)
   } catch (e: any) {
     handleError(e)
-  }
-}
-
-// Switching mode mid-thread must persist, otherwise the next turn silently
-// snaps back to the mode the conversation was created with.
-async function applyMode(next: string) {
-  if (!convId.value) return
-  try {
-    await api.conversationPatch(convId.value, { mode: next })
-  } catch (e: any) {
-    ElMessage.error('切换模式失败：' + String(e?.message || e))
   }
 }
 
@@ -181,16 +173,21 @@ function send() {
     return
   }
 
-  messages.value.push({ id: 'u' + Date.now(), role: 'user', content: text })
+  const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  messages.value.push({ id: 'u' + Date.now(), role: 'user', content: text, time: now })
   input.value = ''
-  const reply: ChatMessage = { id: 'a' + Date.now(), role: 'assistant', content: '', streaming: true }
+  // Must be reactive: streaming events mutate this object's fields in-place, and
+  // Vue only re-renders when those writes go through the proxy — a plain object
+  // pushed into a ref array is snapshotted by the proxy, so edits to the raw
+  // object never trigger an update (the reply only appears after a reload).
+  const reply = reactive<ChatMessage>({ id: 'a' + Date.now(), role: 'assistant', content: '', streaming: true, time: now })
   messages.value.push(reply)
   busy.value = true
   scrollDown()
 
   const handle = streamChat(
     convId.value,
-    { message: text, model: selectedModel.value || undefined },
+    { message: text, model: selectedModel.value || undefined, reasoning: reasoning.value },
     (type, data) => {
       switch (type) {
         case 'delta':
@@ -289,29 +286,6 @@ onMounted(async () => {
     <section class="center">
       <header class="topbar">
         <span class="role-badge" :style="{ background: roleColor }">{{ roleName }}</span>
-        <el-select
-          v-model="selectedModel"
-          size="small"
-          placeholder="模型（留空用角色默认）"
-          style="width: 220px"
-          clearable
-          filterable
-          :disabled="!modelGroups.length"
-        >
-          <el-option-group v-for="g in modelGroups" :key="g.label" :label="g.label">
-            <el-option v-for="o in g.options" :key="o.value" :label="o.label" :value="o.value" />
-          </el-option-group>
-        </el-select>
-        <el-radio-group v-model="mode" size="small" @change="applyMode">
-          <el-radio-button value="chat">对话</el-radio-button>
-          <el-radio-button value="auto">自动</el-radio-button>
-          <el-radio-button value="task">任务</el-radio-button>
-        </el-radio-group>
-        <el-select v-model="permission" size="small" style="width: 126px" @change="applyPermission">
-          <el-option label="权限：询问" value="ask" />
-          <el-option label="权限：自动" value="auto" />
-          <el-option label="权限：完全" value="full" />
-        </el-select>
         <div style="flex: 1" />
         <el-tooltip content="显式停止本轮生成">
           <el-button v-if="busy" size="small" type="danger" plain @click="stopStream?.()">停止</el-button>
@@ -366,15 +340,46 @@ onMounted(async () => {
       </div>
 
       <footer class="composer">
-        <el-input
-          v-model="input"
-          type="textarea"
-          :rows="3"
-          resize="none"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-          @keydown.enter.exact.prevent="send"
-        />
-        <el-button type="primary" :loading="busy" :disabled="!input.trim()" @click="send">发送</el-button>
+        <div class="send-row">
+          <el-input
+            v-model="input"
+            type="textarea"
+            :rows="3"
+            resize="none"
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+            @keydown.enter.exact.prevent="send"
+          />
+          <el-button type="primary" :loading="busy" :disabled="!input.trim()" @click="send">发送</el-button>
+        </div>
+        <div class="composer-options">
+          <span class="opt-label">模型</span>
+          <el-select
+            v-model="selectedModel"
+            size="small"
+            placeholder="默认"
+            style="width: 200px"
+            clearable
+            filterable
+            :disabled="!modelGroups.length"
+          >
+            <el-option-group v-for="g in modelGroups" :key="g.label" :label="g.label">
+              <el-option v-for="o in g.options" :key="o.value" :label="o.label" :value="o.value" />
+            </el-option-group>
+          </el-select>
+          <span class="opt-label">权限</span>
+          <el-select v-model="permission" size="small" style="width: 120px" @change="applyPermission">
+            <el-option label="询问" value="ask" />
+            <el-option label="自动" value="auto" />
+            <el-option label="完全" value="full" />
+          </el-select>
+          <span class="opt-label">思考</span>
+          <el-select v-model="reasoning" size="small" style="width: 120px">
+            <el-option label="自动" value="auto" />
+            <el-option label="无" value="off" />
+            <el-option label="轻思考" value="light" />
+            <el-option label="深度思考" value="deep" />
+          </el-select>
+        </div>
       </footer>
     </section>
 
@@ -437,11 +442,25 @@ onMounted(async () => {
 
 .composer {
   display: flex;
-  gap: 10px;
-  align-items: flex-end;
-  padding: 12px 16px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px 12px;
   border-top: 1px solid var(--ah-border);
   background: var(--ah-bg-elev);
+}
+.composer .send-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+.composer-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.opt-label {
+  font-size: 12px;
+  color: var(--ah-text-dim);
 }
 
 .right {

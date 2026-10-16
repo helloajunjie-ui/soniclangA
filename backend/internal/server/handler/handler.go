@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -166,6 +168,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.modules(w, r, p)
 	case strings.HasPrefix(p, "/api/v1/jobs"):
 		h.jobs(w, r, p)
+	case strings.HasPrefix(p, "/api/v1/generations"):
+		h.generations(w, r, p)
 	case p == "/api/v1/settings":
 		h.settings(w, r)
 	case p == "/v1/chat/completions":
@@ -174,6 +178,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.models(w, r)
 	default:
 		if h.static != nil {
+			// The SPA is rebuilt frequently in development and assets are
+			// content-hashed. Never let a browser serve a stale index.html or
+			// a stale chunk from cache — a stale index pins the whole app to
+			// an old build, which is exactly the "streaming never shows up,
+			// reload fixes it" failure. Force a revalidation every load.
+			w.Header().Set("Cache-Control", "no-store")
 			h.static.ServeHTTP(w, r)
 			return
 		}
@@ -1724,6 +1734,90 @@ func (h *Handler) jobs(w http.ResponseWriter, r *http.Request, p string) {
 	}
 }
 
+// ---- generations (image / video from a provider's image-capable models) ----
+
+func (h *Handler) generations(w http.ResponseWriter, r *http.Request, p string) {
+	if p == "/api/v1/generations/image" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			ProviderID string `json:"providerId"`
+			Model      string `json:"model"`
+			Prompt     string `json:"prompt"`
+			provider.ImageOpts
+		}
+		if err := h.decode(r, &body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if body.ProviderID == "" || body.Model == "" || body.Prompt == "" {
+			http.Error(w, "providerId/model/prompt required", http.StatusBadRequest)
+			return
+		}
+		rt, err := h.Providers.GetRuntime(body.ProviderID)
+		if err != nil {
+			h.json(w, 200, map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
+		gen, ok := rt.(provider.ImageGenerator)
+		if !ok {
+			h.json(w, 200, map[string]interface{}{"ok": false, "error": "该服务商不支持图像生成"})
+			return
+		}
+		res, err := gen.GenerateImage(r.Context(), body.Model, body.Prompt, body.ImageOpts)
+		if err != nil {
+			h.json(w, 200, map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
+		// Auto-save generated pictures to the local data dir so the user's work
+		// is never lost even if the upstream URL expires (TOS links do).
+		if res != nil && (res.URL != "" || len(res.Images) > 0) {
+			h.saveImagesLocal(res)
+		}
+		h.json(w, 200, map[string]interface{}{"ok": true, "result": res})
+		return
+	}
+	if p == "/api/v1/generations/video" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			ProviderID string `json:"providerId"`
+			Model      string `json:"model"`
+			Prompt     string `json:"prompt"`
+		}
+		if err := h.decode(r, &body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if body.ProviderID == "" || body.Model == "" || body.Prompt == "" {
+			http.Error(w, "providerId/model/prompt required", http.StatusBadRequest)
+			return
+		}
+		rt, err := h.Providers.GetRuntime(body.ProviderID)
+		if err != nil {
+			h.json(w, 200, map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
+		gen, ok := rt.(provider.VideoGenerator)
+		if !ok {
+			h.json(w, 200, map[string]interface{}{"ok": false, "error": "该服务商不支持视频生成"})
+			return
+		}
+		res, err := gen.GenerateVideo(r.Context(), body.Model, body.Prompt)
+		if err != nil {
+			h.json(w, 200, map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
+		h.json(w, 200, map[string]interface{}{"ok": true, "result": res})
+		return
+	}
+	http.Error(w, "not found", http.StatusNotFound)
+}
+
 // ---- settings ----
 
 func (h *Handler) settings(w http.ResponseWriter, r *http.Request) {
@@ -1753,6 +1847,74 @@ func (h *Handler) settings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// saveImagesLocal downloads every generated image into the data dir so the
+// result survives the upstream TOS link's 24h expiry. Failures are silent:
+// the picture still returned to the UI via the live URL, we just could not
+// keep a copy. Only the first image is used for LocalPath to keep it simple.
+func (h *Handler) saveImagesLocal(res *provider.ImageResult) {
+	dir := filepath.Join(h.Cfg.DataDir, "images")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	dl := func(src string) (string, error) {
+		req, err := http.NewRequest(http.MethodGet, src, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("User-Agent", "AQBot-compat/1.0")
+		cli := &http.Client{Timeout: 60 * time.Second}
+		resp, err := cli.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("download %d", resp.StatusCode)
+		}
+		ext := ".png"
+		if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "jpeg") || strings.Contains(ct, "jpg") {
+			ext = ".jpg"
+		}
+		name := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), randHex(6), ext)
+		full := filepath.Join(dir, name)
+		f, err := os.Create(full)
+		if err != nil {
+			return "", err
+		}
+		if _, err := io.Copy(f, resp.Body); err != nil {
+			f.Close()
+			os.Remove(full)
+			return "", err
+		}
+		f.Close()
+		return full, nil
+	}
+	candidates := res.Images
+	if len(candidates) == 0 && res.URL != "" {
+		candidates = []string{res.URL}
+	}
+	saved := make([]string, 0, len(candidates))
+	for _, u := range candidates {
+		if p, err := dl(u); err == nil {
+			saved = append(saved, p)
+		}
+	}
+	if len(saved) > 0 {
+		res.LocalPath = saved[0]
+		res.Images = saved
+	}
+}
+
+// randHex returns n lowercase hex chars for a unique-ish local file suffix.
+func randHex(n int) string {
+	const hex = "0123456789abcdef"
+	var b []byte
+	for i := 0; i < n; i++ {
+		b = append(b, hex[time.Now().UnixNano()%16])
+	}
+	return string(b)
+}
+
 // ---- chat SSE (native events, DESIGN §15.1) ----
 
 func (h *Handler) chatSSE(w http.ResponseWriter, r *http.Request, convID string) {
@@ -1761,11 +1923,12 @@ func (h *Handler) chatSSE(w http.ResponseWriter, r *http.Request, convID string)
 		return
 	}
 	var body struct {
-		Message string `json:"message"`
-		Content string `json:"content"`
-		RoleID  string `json:"roleId"`
-		Model   string `json:"model"`
-		Mode    string `json:"mode"`
+		Message   string `json:"message"`
+		Content   string `json:"content"`
+		RoleID    string `json:"roleId"`
+		Model     string `json:"model"`
+		Mode      string `json:"mode"`
+		Reasoning string `json:"reasoning"`
 	}
 	_ = h.decode(r, &body)
 	msg := body.Message
@@ -1782,6 +1945,7 @@ func (h *Handler) chatSSE(w http.ResponseWriter, r *http.Request, convID string)
 		Message:        msg,
 		Model:          body.Model,
 		Mode:           body.Mode,
+		Reasoning:      body.Reasoning,
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {

@@ -52,11 +52,12 @@ onMounted(boot)
         <RouterLink to="/roles" class="nav-item" title="角色"><el-icon><User /></el-icon><span>角色</span></RouterLink>
         <RouterLink to="/skills" class="nav-item" title="技能"><el-icon><MagicStick /></el-icon><span>技能</span></RouterLink>
         <RouterLink to="/knowledge" class="nav-item" title="资料库"><el-icon><Collection /></el-icon><span>资料库</span></RouterLink>
+        <RouterLink to="/paint" class="nav-item" title="绘画"><el-icon><Picture /></el-icon><span>绘画</span></RouterLink>
+        <RouterLink to="/video" class="nav-item" title="视频"><el-icon><VideoCamera /></el-icon><span>视频</span></RouterLink>
 
         <div class="nav-group">配置</div>
         <RouterLink to="/providers" class="nav-item" title="服务商"><el-icon><Connection /></el-icon><span>服务商</span></RouterLink>
         <RouterLink to="/tools" class="nav-item" title="工具"><el-icon><Tools /></el-icon><span>工具</span></RouterLink>
-        <RouterLink to="/control" class="nav-item" title="软件控制"><el-icon><Monitor /></el-icon><span>软件控制</span></RouterLink>
 
         <div class="nav-group">系统</div>
         <RouterLink to="/settings" class="nav-item" title="设置"><el-icon><Setting /></el-icon><span>设置</span></RouterLink>

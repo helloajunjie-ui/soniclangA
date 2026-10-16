@@ -80,6 +80,12 @@ export const api = {
     post(`/providers/${id}/model-prefs/all`, patch),
   providerToggle: (id: string, enabled: boolean) => post(`/providers/${id}/toggle`, { enabled }),
 
+  // generations (绘画/视频：走服务商的图像/视频生成模型)
+  generateImage: (providerId: string, model: string, prompt: string, opts?: Record<string, any>) =>
+    post('/generations/image', { providerId, model, prompt, ...(opts || {}) }),
+  generateVideo: (providerId: string, model: string, prompt: string) =>
+    post('/generations/video', { providerId, model, prompt }),
+
   // roles
   roles: () => get('/roles'),
   roleCreate: (r: any) => post('/roles', r),
@@ -219,7 +225,7 @@ export const api = {
  */
 export function streamChat(
   convId: string,
-  body: { message: string; model?: string; mode?: string },
+  body: { message: string; model?: string; mode?: string; reasoning?: string },
   onEvent: (type: string, data: any) => void,
 ): { abort: () => void } {
   const ctrl = new AbortController()

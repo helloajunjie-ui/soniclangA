@@ -88,6 +88,9 @@ type ChatInput struct {
 	// "use the role's value".
 	Temperature *float64 `json:"temperature,omitempty"`
 	MaxTokens   *int     `json:"maxTokens,omitempty"`
+	// Reasoning overrides the thinking effort (low|medium|high) for models that
+	// expose it (OpenAI o-series). Empty means the model's default.
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // Orchestrator wires the main loop together.
@@ -343,12 +346,13 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 			return
 		}
 		opts := provider.CallOptions{
-			Model:       model,
-			Temperature: o.temperature(role, in),
-			MaxTokens:   o.maxTokens(role, in),
-			TopP:        role.TopP,
-			Tools:       o.toolSpecs(),
-			Stream:      true,
+			Model:           model,
+			Temperature:     o.temperature(role, in),
+			MaxTokens:       o.maxTokens(role, in),
+			TopP:            role.TopP,
+			Tools:           o.toolSpecs(),
+			Stream:          true,
+			ReasoningEffort: in.Reasoning,
 		}
 		stream, err := rt.ChatStream(ctx, msgs, opts)
 		if err != nil {
@@ -807,6 +811,12 @@ func (o *Orchestrator) resolveTarget(role *role.Role, conv *conversation.Convers
 	}
 	if model == "" {
 		model = role.Model
+	}
+	// A role is a prompt, not a model binding. When neither the role nor the
+	// request names a model, fall back to the global default so a configured
+	// service provider is always usable.
+	if model == "" {
+		model = o.Config.GetSettings().DefaultModel
 	}
 	if providerID == "" || model == "" {
 		return "", "", fmt.Errorf("未配置 provider/model：请在角色或请求中指定 model（格式 provider/model）")

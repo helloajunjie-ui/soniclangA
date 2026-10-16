@@ -8,6 +8,7 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
+  time?: string
   thinking?: string
   tools?: { name: string; callId?: string; args?: any; output?: string; failed?: boolean; summary?: string }[]
   citations?: { doc?: string; docName?: string; chunk?: number; text?: string }[]
@@ -29,12 +30,31 @@ const props = defineProps<{
 const showThinking = defineModel<boolean>('showThinking', { default: false })
 // Tool calls are internal bookkeeping; collapsed to a compact strip by default.
 const showTools = ref(false)
+const copied = ref(false)
 
 function toolCount(): number {
   return props.msg.tools?.length || 0
 }
 function toolFailed(): boolean {
   return (props.msg.tools || []).some((t) => t.failed)
+}
+async function copyContent() {
+  const text = props.msg.content || ''
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // Clipboard API can be blocked on some contexts; fall back to select copy.
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+  }
+  copied.value = true
+  setTimeout(() => (copied.value = false), 1200)
 }
 </script>
 
@@ -56,11 +76,11 @@ function toolFailed(): boolean {
         <span>思考过程</span>
         <span class="dim">{{ msg.thinking.length }} 字</span>
       </div>
-      <pre v-if="showThinking" class="think-body">{{ msg.thinking }}</pre>
+      <pre v-if="showThinking || msg.streaming" class="think-body">{{ msg.thinking }}</pre>
     </div>
 
-    <!-- Tool calls: a compact strip that expands to full blocks only when asked.
-         This keeps the model's internal work from owning the reply. -->
+    <!-- Tool calls: compact strip, expands on click — and auto-expands during
+         streaming so the user always sees what the model is doing. -->
     <div v-if="toolCount()" class="tools" @click="showTools = !showTools">
       <el-icon class="caret" :class="{ open: showTools }"><ArrowRight /></el-icon>
       <span class="tools-count">{{ toolCount() }} 个工具</span>
@@ -69,20 +89,34 @@ function toolFailed(): boolean {
       </el-tag>
       <span v-if="toolFailed()" class="tools-fail">有失败</span>
     </div>
-    <div v-if="showTools" class="tools-body">
-      <ToolCallBlock
-        v-for="(t, i) in msg.tools"
-        :key="i"
-        :name="t.name"
-        :summary="t.summary"
-        :output="t.output"
-        :failed="t.failed"
-      />
+    <div v-if="showTools || msg.streaming" class="tools-body">
+      <div v-for="(t, i) in msg.tools" :key="i" class="tool-line">
+        <el-icon class="tl-icon" :class="t.failed ? 'tl-err' : ''">
+          <component :is="t.failed ? 'CircleClose' : t.output ? 'CircleCheck' : 'Loading'" :class="t.failed || t.output ? '' : 'is-loading'" />
+        </el-icon>
+        <span class="tl-name">{{ t.name }}</span>
+        <span v-if="!t.output && !t.failed" class="tl-run">运行中…</span>
+        <span v-else-if="t.failed" class="tl-fail">失败</span>
+        <span v-else class="tl-ok">完成</span>
+        <span v-if="t.summary" class="tl-summary">{{ t.summary }}</span>
+      </div>
     </div>
 
     <div class="bubble" :class="{ failed: msg.failed }">
-      <MarkdownView :content="msg.content" />
-      <span v-if="msg.streaming" class="cursor" />
+      <MarkdownView v-if="msg.content" :content="msg.content" />
+      <span v-else-if="msg.streaming" class="thinking-hint">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        <span v-if="msg.tools?.length">正在调用工具…</span>
+        <span v-else>正在思考…</span>
+      </span>
+      <span v-if="msg.streaming && msg.content" class="cursor" />
+      <div class="bubble-foot">
+        <button v-if="msg.content" class="copy-btn" @click.stop="copyContent">
+          <el-icon :size="12"><component :is="copied ? 'Check' : 'CopyDocument'" /></el-icon>
+          <span>{{ copied ? '已复制' : '复制' }}</span>
+        </button>
+        <span v-if="msg.time" class="time">{{ msg.time }}</span>
+      </div>
     </div>
 
     <div v-if="msg.citations?.length" class="cites">
@@ -117,7 +151,7 @@ function toolFailed(): boolean {
   margin-bottom: 6px;
 }
 .route {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ah-text-dim);
   border: 1px solid var(--ah-border);
   padding: 0 6px;
@@ -142,6 +176,13 @@ function toolFailed(): boolean {
   vertical-align: text-bottom;
   animation: blink 1s steps(2) infinite;
 }
+.thinking-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ah-text-dim);
+  font-size: 12.5px;
+}
 @keyframes blink {
   50% {
     opacity: 0;
@@ -151,7 +192,7 @@ function toolFailed(): boolean {
   border: 1px dashed var(--ah-border);
   border-radius: 8px;
   margin-bottom: 6px;
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 .think-head {
   display: flex;
@@ -163,7 +204,7 @@ function toolFailed(): boolean {
 }
 .caret {
   transition: transform 0.15s;
-  font-size: 11px;
+  font-size: 12px;
 }
 .caret.open {
   transform: rotate(90deg);
@@ -181,7 +222,7 @@ function toolFailed(): boolean {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--ah-warn);
   border: 1px solid var(--ah-warn);
   border-radius: 6px;
@@ -199,7 +240,7 @@ function toolFailed(): boolean {
   padding: 3px 8px;
   margin-bottom: 6px;
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--ah-text-dim);
   background: var(--ah-bg-sunken);
 }
@@ -215,6 +256,48 @@ function toolFailed(): boolean {
 .tools-body {
   margin-bottom: 6px;
 }
+/* 每个工具一行：状态图标 + 名称 + 状态 + 摘要 */
+.tool-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--ah-text-dim);
+  padding: 4px 8px;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  margin-bottom: 4px;
+  background: var(--ah-bg-sunken);
+}
+.tl-icon {
+  color: var(--ah-primary);
+}
+.tl-icon.tl-err {
+  color: var(--ah-danger);
+}
+.tl-name {
+  font-weight: 500;
+  color: var(--ah-text);
+}
+.tl-run {
+  color: var(--ah-text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tl-ok {
+  color: var(--ah-success);
+}
+.tl-fail {
+  color: var(--ah-danger);
+}
+.tl-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+  color: var(--ah-text-dim);
+}
 .cites {
   margin-top: 6px;
   display: flex;
@@ -223,7 +306,7 @@ function toolFailed(): boolean {
   align-items: center;
 }
 .cites-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ah-text-dim);
 }
 .cite {
@@ -232,5 +315,36 @@ function toolFailed(): boolean {
 .dim {
   margin-left: auto;
   opacity: 0.7;
+}
+/* 气泡底部：复制按钮（左）+ 时间戳（右） */
+.bubble-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--ah-border) 55%, transparent);
+}
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: var(--ah-text-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+.copy-btn:hover {
+  background: var(--ah-bg-sunken);
+  color: var(--ah-primary);
+}
+.time {
+  font-size: 11px;
+  color: var(--ah-text-dim);
+  opacity: 0.75;
 }
 </style>

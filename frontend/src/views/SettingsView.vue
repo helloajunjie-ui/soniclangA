@@ -120,7 +120,7 @@ onMounted(load)
 
 <style scoped>
 .hint {
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--ah-text-dim);
   margin-left: 8px;
 }

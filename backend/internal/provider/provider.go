@@ -53,12 +53,13 @@ type Usage struct {
 
 // CallOptions parameterizes a chat completion call.
 type CallOptions struct {
-	Model       string
-	Temperature float64
-	MaxTokens   int
-	TopP        float64
-	Tools       []ToolSpec
-	Stream      bool
+	Model           string
+	Temperature     float64
+	MaxTokens       int
+	TopP            float64
+	Tools           []ToolSpec
+	Stream          bool
+	ReasoningEffort string // low|medium|high for models that expose reasoning_effort
 }
 
 // ChatResponse is a non-streaming completion result.
@@ -89,6 +90,59 @@ type Runtime interface {
 	ChatStream(ctx context.Context, messages []Message, opts CallOptions) (<-chan StreamChunk, error)
 	Embeddings(ctx context.Context, model string, texts []string) ([][]float32, error)
 	Models(ctx context.Context) ([]ModelInfo, error)
+}
+
+// ImageOpts are the user-tunable generation parameters for one image request.
+// Empty strings mean "let the vendor / our heuristic choose". Most users leave
+// these at their defaults; the painting page exposes the common ones.
+type ImageOpts struct {
+	Size         string `json:"size,omitempty"`
+	Quality      string `json:"quality,omitempty"`
+	OutputFormat string `json:"output_format,omitempty"`
+	Background   string `json:"background,omitempty"`
+	N            int    `json:"n,omitempty"`
+	// Image/Images are reference pictures for image-to-image (img2img). Image
+	// is a single public URL; Images is the multi-reference form (some vendors
+	// accept an array). Only one is meant to be set.
+	Image  string   `json:"image,omitempty"`
+	Images []string `json:"images,omitempty"`
+}
+
+// ImageGenerator is an optional capability: a runtime that can produce images
+// from a text prompt (OpenAI-compatible /images/generations, CogView, Tongyi
+// Wanxiang, etc.). A runtime that does not implement it simply has no drawing
+// capability; handlers must type-assert before use. This keeps the core Runtime
+// contract untouched so chat-only vendors and the test fakes stay as they are.
+type ImageGenerator interface {
+	GenerateImage(ctx context.Context, model, prompt string, opts ImageOpts) (*ImageResult, error)
+}
+
+// ImageResult is one generated image. Vendors return either a public URL or a
+// base64 payload; the runtime normalizes to both when it can.
+type ImageResult struct {
+	URL       string `json:"url,omitempty"`
+	B64       string `json:"b64,omitempty"`
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	LocalPath string `json:"localPath,omitempty"`
+	// Images holds every generated picture when n>1 (or a vendor returns a
+	// multi-image batch); URL is then the first one for convenience.
+	Images []string `json:"images,omitempty"`
+}
+
+// VideoGenerator is an optional capability: a runtime that can produce video
+// from a text prompt. Video is usually an async task (submit then poll), so the
+// result carries either a ready URL or a task id the caller can poll.
+type VideoGenerator interface {
+	GenerateVideo(ctx context.Context, model, prompt string) (*VideoResult, error)
+}
+
+// VideoResult is the outcome of a video generation request.
+type VideoResult struct {
+	URL   string `json:"url,omitempty"`
+	Task  string `json:"taskId,omitempty"`
+	Model string `json:"model"`
+	Prompt string `json:"prompt"`
 }
 
 // ---- entities (persisted) ----
