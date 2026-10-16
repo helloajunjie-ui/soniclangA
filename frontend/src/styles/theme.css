@@ -130,6 +130,83 @@ html.dark {
   --el-collapse-content-text-color: var(--ah-text);
 }
 
+/* 温和护眼主题（data-theme=soft）：低饱和、暖色调，避免高对比刺眼。
+   所有表面为暖米白/暖灰，文字是暖深灰而非纯黑，主色是柔和的鼠尾草绿。
+   与 dark 一样把整套 Element Plus 控件接管到 --ah-*，杜绝任何白块。 */
+html[data-theme='soft'] {
+  --ah-bg: #f3f0ea;
+  --ah-bg-elev: #fbf9f4;
+  --ah-bg-sunken: #ece7dc;
+  --ah-border: #e2dccd;
+  --ah-text: #403c34;
+  --ah-text-dim: #8b8477;
+  --ah-primary: #7a9468;
+  --ah-primary-soft: rgba(122, 148, 104, 0.14);
+  --ah-danger: #c66a5f;
+  --ah-success: #6d9e6d;
+  --ah-warn: #c99a4d;
+  --ah-shadow: 0 1px 3px rgba(120, 110, 90, 0.10);
+
+  --el-bg-color: var(--ah-bg-elev);
+  --el-bg-color-overlay: var(--ah-bg-elev);
+  --el-bg-color-page: var(--ah-bg);
+  --el-mask-color: rgba(60, 55, 45, 0.5);
+  --el-fill-color-blank: var(--ah-bg-elev);
+  --el-fill-color: var(--ah-bg-elev);
+  --el-fill-color-light: var(--ah-bg-elev);
+  --el-fill-color-lighter: var(--ah-bg-elev);
+  --el-fill-color-extra-light: var(--ah-bg-elev);
+  --el-fill-color-dark: var(--ah-border);
+  --el-fill-color-darker: var(--ah-border);
+  --el-border-color: var(--ah-border);
+  --el-border-color-light: var(--ah-border);
+  --el-border-color-lighter: var(--ah-border);
+  --el-border-color-extra-light: var(--ah-border);
+  --el-border-color-dark: var(--ah-border);
+  --el-border-color-hover: color-mix(in srgb, var(--ah-border) 70%, var(--ah-text-dim));
+  --el-text-color-primary: var(--ah-text);
+  --el-text-color-regular: var(--ah-text);
+  --el-text-color-secondary: var(--ah-text-dim);
+  --el-text-color-placeholder: var(--ah-text-dim);
+  --el-text-color-disabled: var(--ah-text-dim);
+  --el-input-bg-color: var(--ah-bg-elev);
+  --el-input-border-color: var(--ah-border);
+  --el-input-hover-border-color: var(--ah-border);
+  --el-input-focus-border-color: var(--el-color-primary);
+  --el-input-text-color: var(--ah-text);
+  --el-input-placeholder-color: var(--ah-text-dim);
+  --el-input-fill-color: var(--ah-bg-elev);
+  --el-popper-bg-color: var(--ah-bg-elev);
+  --el-select-bg-color: var(--ah-bg-elev);
+  --el-select-input-color: var(--ah-text);
+  --el-select-border-color: var(--ah-border);
+  --el-dropdown-bg-color: var(--ah-bg-elev);
+  --el-dropdown-menu-item-hover-bg-color: var(--ah-bg-sunken);
+  --el-card-bg-color: var(--ah-bg-elev);
+  --el-dialog-bg-color: var(--ah-bg-elev);
+  --el-message-bg-color: var(--ah-bg-elev);
+  --el-notification-bg-color: var(--ah-bg-elev);
+  --el-tooltip-bg-color: var(--ah-bg-elev);
+  --el-table-bg-color: var(--ah-bg-elev);
+  --el-table-tr-bg-color: var(--ah-bg-elev);
+  --el-table-header-bg-color: var(--ah-bg-sunken);
+  --el-table-row-hover-bg-color: var(--ah-bg-sunken);
+  --el-table-border-color: var(--ah-border);
+  --el-tabs-header-bg-color: transparent;
+  --el-tabs-border-color: var(--ah-border);
+  --el-upload-dragger-bg-color: var(--ah-bg-elev);
+  --el-empty-bg-color: transparent;
+  --el-form-label-color: var(--ah-text-dim);
+  --el-radio-bg-color: var(--ah-bg-elev);
+  --el-checkbox-bg-color: var(--ah-bg-elev);
+  --el-switch-bg-color: var(--ah-border);
+  --el-collapse-header-bg-color: var(--ah-bg-elev);
+  --el-collapse-content-bg-color: var(--ah-bg);
+  --el-collapse-border-color: var(--ah-border);
+  --el-collapse-header-text-color: var(--ah-text);
+  --el-collapse-content-text-color: var(--ah-text);
+}
+
 /* Raise Element Plus base size to match the 15px body so every component
    (inputs, selects, buttons, dialogs) inherits the larger, easier-to-read text. */
 :root {

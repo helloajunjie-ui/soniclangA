@@ -10,7 +10,7 @@ export interface ChatMessage {
   content: string
   time?: string
   thinking?: string
-  tools?: { name: string; callId?: string; args?: any; output?: string; failed?: boolean; summary?: string }[]
+  tools?: { name: string; callId?: string; args?: any; output?: string; failed?: boolean; summary?: string; startAt?: number; duration?: number }[]
   citations?: { doc?: string; docName?: string; chunk?: number; text?: string }[]
   route?: { mode?: string; confidence?: number }
   fallback?: string
@@ -37,6 +37,27 @@ function toolCount(): number {
 }
 function toolFailed(): boolean {
   return (props.msg.tools || []).some((t) => t.failed)
+}
+// How many tools have finished (have an output or failed).
+function toolDone(): number {
+  return (props.msg.tools || []).filter((t) => t.output || t.failed).length
+}
+function toolRunning(): boolean {
+  return (props.msg.tools || []).some((t) => !t.output && !t.failed)
+}
+// Current AI stage while streaming — gives the user a live sense of what the
+// model is doing instead of an opaque "typing" indicator.
+function currentStage(): string {
+  if (!props.msg.streaming) return ''
+  if (toolRunning()) return '正在调用工具'
+  if (props.msg.thinking) return '思考中'
+  if (props.msg.content) return '生成回答'
+  return '等待模型响应'
+}
+// Format a duration in seconds for display.
+function fmtDur(s?: number): string {
+  if (s == null) return ''
+  return s < 1 ? `${Math.round(s * 1000)}ms` : `${s}s`
 }
 async function copyContent() {
   const text = props.msg.content || ''
@@ -84,6 +105,11 @@ async function copyContent() {
     <div v-if="toolCount()" class="tools" @click="showTools = !showTools">
       <el-icon class="caret" :class="{ open: showTools }"><ArrowRight /></el-icon>
       <span class="tools-count">{{ toolCount() }} 个工具</span>
+      <!-- Live progress while the task runs: done/total + current stage. -->
+      <span class="tools-progress" :class="{ running: toolRunning() }">
+        <template v-if="toolRunning()">进行中 {{ toolDone() }}/{{ toolCount() }}</template>
+        <template v-else>已完成 {{ toolDone() }}/{{ toolCount() }}</template>
+      </span>
       <el-tag v-for="t in msg.tools" :key="t.name" size="small" :type="t.failed ? 'danger' : 'info'" effect="plain">
         {{ t.name }}
       </el-tag>
@@ -98,9 +124,16 @@ async function copyContent() {
         <span v-if="!t.output && !t.failed" class="tl-run">运行中…</span>
         <span v-else-if="t.failed" class="tl-fail">失败</span>
         <span v-else class="tl-ok">完成</span>
+        <span v-if="t.duration" class="tl-dur">{{ fmtDur(t.duration) }}</span>
         <span v-if="t.summary" class="tl-summary">{{ t.summary }}</span>
       </div>
     </div>
+
+    <!-- Live stage badge while streaming: tells the user what the model is
+         doing right now (thinking / tool / writing). -->
+    <span v-if="msg.streaming && currentStage()" class="stage-badge">
+      <el-icon class="is-loading"><Loading /></el-icon>{{ currentStage() }}
+    </span>
 
     <div class="bubble" :class="{ failed: msg.failed }">
       <MarkdownView v-if="msg.content" :content="msg.content" />
@@ -250,8 +283,46 @@ async function copyContent() {
 .tools-count {
   font-weight: 500;
 }
+.tools-progress {
+  font-size: 12px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--ah-bg-sunken);
+  border: 1px solid var(--ah-border);
+  color: var(--ah-text-dim);
+}
+.tools-progress.running {
+  color: var(--ah-primary);
+  border-color: var(--ah-primary);
+  animation: ah-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ah-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
 .tools-fail {
   color: var(--ah-danger);
+}
+.tl-dur {
+  font-size: 11.5px;
+  color: var(--ah-text-dim);
+  background: var(--ah-bg-sunken);
+  padding: 0 6px;
+  border-radius: 6px;
+  flex: none;
+}
+/* 阶段徽章：流式时显示 AI 当前行为（思考/工具/回答） */
+.stage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ah-primary);
+  background: var(--ah-primary-soft);
+  border: 1px solid var(--ah-primary);
+  padding: 2px 10px;
+  border-radius: 999px;
+  margin-bottom: 6px;
 }
 .tools-body {
   margin-bottom: 6px;

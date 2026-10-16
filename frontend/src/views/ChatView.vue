@@ -219,6 +219,7 @@ function send() {
             name: tc.name || '调用中…',
             callId: tc.id,
             args: tc.argumentsDelta ?? tc.arguments,
+            startAt: Date.now(),
           })
           break
         }
@@ -235,6 +236,7 @@ function send() {
             t.name = data?.name || t.name
             t.output = data?.result
             t.summary = String(data?.result || '').slice(0, 60)
+            if (t.startAt) t.duration = Math.round((Date.now() - t.startAt) / 100) / 10
           }
           break
         }

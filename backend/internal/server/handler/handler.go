@@ -26,6 +26,7 @@ import (
 	"github.com/agenthub/agent-proxy/internal/job"
 	"github.com/agenthub/agent-proxy/internal/knowledge"
 	"github.com/agenthub/agent-proxy/internal/knowledge/ingest"
+	"github.com/agenthub/agent-proxy/internal/logx"
 	"github.com/agenthub/agent-proxy/internal/mcp"
 	"github.com/agenthub/agent-proxy/internal/memory"
 	"github.com/agenthub/agent-proxy/internal/memory/consolidate"
@@ -72,6 +73,7 @@ type Handler struct {
 	MCP     *mcp.Manager
 
 	static http.Handler
+	log *logx.Logger
 }
 
 // New constructs a Handler and a static file server for the embedded dist.
@@ -85,13 +87,54 @@ func New(cfg *config.Config, prov *provider.Service, roles *role.Service, convs 
 		Knowledge: know, Memory: mem, Method: meth, Control: ctrl, REA: reaSvc,
 		Tools: tools, Jobs: jobs, Ingest: ing, Orch: orch,
 		Extractor: ex, Consolidate: cons, static: static,
+		log: logx.New(filepath.Join(cfg.DataDir, "logs", "agenthub.log")),
 	}
+}
+
+// statusWriter captures the response status so the request log can classify
+// every call. The bare http.ResponseWriter only reports the status at write
+// time, which the defer cannot read back.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (s *statusWriter) WriteHeader(c int) {
+	s.status = c
+	s.wrote = true
+	s.ResponseWriter.WriteHeader(c)
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	if !s.wrote {
+		s.status = http.StatusOK
+		s.wrote = true
+	}
+	return s.ResponseWriter.Write(b)
 }
 
 // ---- middleware + dispatch ----
 
-// ServeHTTP applies CORS + auth and dispatches to the right handler.
+// ServeHTTP applies CORS + auth and dispatches to the right handler. Every
+// request is also written to the global runtime log (data/logs/agenthub.log)
+// with its method, path, status and latency so failures are observable after
+// the fact instead of only in a live console.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	lw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	defer func() {
+		dur := time.Since(start).Round(time.Millisecond)
+		switch {
+		case lw.status >= 500:
+			h.log.Errorf("HTTP %s %s -> %d (%s)", r.Method, r.URL.Path, lw.status, dur)
+		case lw.status >= 400:
+			h.log.Warnf("HTTP %s %s -> %d (%s)", r.Method, r.URL.Path, lw.status, dur)
+		default:
+			h.log.Infof("HTTP %s %s -> %d (%s)", r.Method, r.URL.Path, lw.status, dur)
+		}
+	}()
+	w = lw
 	// CORS previously answered "*" for every request and the API accepted any
 	// Origin. Binding to loopback does not make that safe: the browser of the
 	// user sitting at the machine is also "local", so any page they visited
@@ -1959,11 +2002,17 @@ func (h *Handler) chatSSE(w http.ResponseWriter, r *http.Request, convID string)
 
 	ch, err := h.Orch.Chat(r.Context(), in)
 	if err != nil {
+		h.log.Errorf("chat(%s): %v", in.ConversationID, err)
 		fmt.Fprintf(w, "event: error\ndata: %s\n\n", mustJSON(map[string]interface{}{"message": err.Error()}))
 		flusher.Flush()
 		return
 	}
 	for ev := range ch {
+		if ev.Type == "error" {
+			if m, _ := ev.Data["message"].(string); m != "" {
+				h.log.Errorf("chat(%s) stream error: %s", in.ConversationID, m)
+			}
+		}
 		payload := map[string]interface{}{"type": ev.Type, "data": ev.Data, "requestId": ev.RequestID}
 		fmt.Fprintf(w, "data: %s\n\n", mustJSON(payload))
 		flusher.Flush()

@@ -15,15 +15,22 @@ export const store = reactive({
   methodologies: [] as any[],
   modules: [] as any[],
   settings: null as any,
-  theme: (localStorage.getItem('agenthub-theme') || 'dark') as 'dark' | 'light',
+  theme: (localStorage.getItem('agenthub-theme') || 'dark') as 'dark' | 'light' | 'soft',
   backendVersion: '',
   booted: false,
 })
 
-export const themeClass = computed(() => (store.theme === 'dark' ? 'theme-dark' : 'theme-light'))
+// Three palettes: theme-dark (default), theme-light (high contrast) and
+// theme-soft (warm, low-saturation, easier on the eyes). The class name is
+// used by components that want a themed variant without reaching into the DOM.
+const themeClassMap = { dark: 'theme-dark', light: 'theme-light', soft: 'theme-soft' } as const
+export const themeClass = computed(() => themeClassMap[store.theme])
+
+const themeOrder = ['dark', 'soft', 'light'] as const
 
 export function toggleTheme() {
-  store.theme = store.theme === 'dark' ? 'light' : 'dark'
+  const idx = themeOrder.indexOf(store.theme as (typeof themeOrder)[number])
+  store.theme = themeOrder[(idx + 1) % themeOrder.length]
   localStorage.setItem('agenthub-theme', store.theme)
   applyTheme()
 }

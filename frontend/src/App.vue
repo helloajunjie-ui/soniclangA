@@ -7,6 +7,16 @@ import { boot, deleteConversation, roleById, store, toggleTheme } from '@/stores
 const route = useRoute()
 const router = useRouter()
 
+// Theme button is a 3-state cycle: 深色 → 温和 → 浅色. Show both a label and
+// an icon so the current palette is obvious at a glance.
+const themeMeta = {
+  dark: { label: '深色', icon: 'Moon' },
+  soft: { label: '温和', icon: 'Sunny' },
+  light: { label: '浅色', icon: 'Sunny' },
+} as const
+const themeLabel = computed(() => themeMeta[store.theme].label)
+const themeIcon = computed(() => themeMeta[store.theme].icon)
+
 // The active conversation is whatever the URL says. Sidebar and chat page share
 // this single source of truth, so switching here drives the chat view directly.
 const activeConv = computed(() => (route.params.id as string) || '')
@@ -89,9 +99,9 @@ onMounted(boot)
       </div>
 
       <div class="side-foot">
-        <div class="nav-item clickable" @click="toggleTheme">
-          <el-icon><component :is="store.theme === 'dark' ? 'Sunny' : 'Moon'" /></el-icon>
-          <span>{{ store.theme === 'dark' ? '浅色' : '深色' }}</span>
+        <div class="nav-item clickable" @click="toggleTheme" :title="'当前：' + themeLabel">
+          <el-icon><component :is="themeIcon" /></el-icon>
+          <span>{{ themeLabel }}</span>
         </div>
         <div class="ver">后端 {{ store.backendVersion || '…' }}</div>
       </div>

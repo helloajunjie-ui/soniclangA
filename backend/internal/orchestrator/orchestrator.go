@@ -818,6 +818,20 @@ func (o *Orchestrator) resolveTarget(role *role.Role, conv *conversation.Convers
 	if model == "" {
 		model = o.Config.GetSettings().DefaultModel
 	}
+	// The global default model can point at a vendor the resolved provider does
+	// not actually offer (e.g. defaultProvider=豆包 but defaultModel=
+	// deepseek-flash). When that happens, fall back to the provider's first
+	// usable model so provider/model can never be a cross-vendor pair that only
+	// fails at call time with a confusing error.
+	if providerID != "" && o.Providers != nil {
+		if p, err := o.Providers.Get(providerID); err == nil && p != nil {
+			if !providerOffers(p, model) {
+				if m := firstUsableModel(p); m != "" {
+					model = m
+				}
+			}
+		}
+	}
 	if providerID == "" || model == "" {
 		return "", "", fmt.Errorf("未配置 provider/model：请在角色或请求中指定 model（格式 provider/model）")
 	}
@@ -828,4 +842,38 @@ func (o *Orchestrator) resolveTarget(role *role.Role, conv *conversation.Convers
 		return "", "", fmt.Errorf("服务商「%s」已停用：请在「服务商」页重新启用，或改选其它服务商", providerID)
 	}
 	return providerID, model, nil
+}
+
+// providerOffers reports whether the provider advertises the model and the
+// user has not disabled it. An unlisted model means "not offered by this
+// vendor" even if the string is the global default.
+func providerOffers(p *provider.Provider, model string) bool {
+	if p == nil || model == "" {
+		return false
+	}
+	for _, m := range p.Models {
+		if m.ID != model {
+			continue
+		}
+		if pref, ok := p.ModelPrefs[model]; ok && pref.Disabled {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// firstUsableModel returns the provider's first advertised model that the user
+// has not disabled, or "" when the catalogue is empty.
+func firstUsableModel(p *provider.Provider) string {
+	if p == nil {
+		return ""
+	}
+	for _, m := range p.Models {
+		if pref, ok := p.ModelPrefs[m.ID]; ok && pref.Disabled {
+			continue
+		}
+		return m.ID
+	}
+	return ""
 }
