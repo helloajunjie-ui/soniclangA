@@ -393,7 +393,11 @@ func (a *openAIAdapter) GenerateVideo(ctx context.Context, model, prompt string)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.firstSecret())
-	client := &http.Client{}
+	// A generation call that never returns would otherwise hang the request
+	// forever (the bare http.Client{} had no timeout). Video creation is usually
+	// async — the upstream returns a task id quickly — but a synchronous variant
+	// can take as long as image generation, so bound it the same way.
+	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -427,10 +431,83 @@ func (a *openAIAdapter) GenerateVideo(ctx context.Context, model, prompt string)
 			res.Task = out.ID
 		}
 	}
+	// ARK (Doubao seedance) video creation is async: the submit call returns a
+	// task id and the finished clip only appears on the task endpoint. Poll it
+	// (a read-only GET, no extra billing) for up to ~60s; if it never resolves
+	// we hand the task id back and the caller can decide, rather than a dead end
+	// where a generated video is never fetched.
+	if res.Task != "" && isARKBase(a.entity.BaseURL) {
+		if u := a.pollARKVideoTask(ctx, res.Task); u != "" {
+			res.URL = u
+		}
+	}
 	if res.URL == "" && res.Task == "" {
 		return nil, fmt.Errorf("video upstream: no url or task id in response")
 	}
 	return res, nil
+}
+
+// isARKBase reports whether the base URL belongs to Volcengine Ark, which uses
+// a different image/audio/video generation surface than plain OpenAI.
+func isARKBase(base string) bool {
+	b := strings.ToLower(base)
+	return strings.Contains(b, "ark.cn-beijing.volces.com") || strings.Contains(b, "volces.com")
+}
+
+// pollARKVideoTask polls the Volcengine Ark task endpoint for a finished video
+// URL. It is read-only and stops early on failure/success-without-url. The
+// endpoint shape is documented at
+// https://www.volcengine.com/docs/82379/1521309 ("查询视频生成任务").
+func (a *openAIAdapter) pollARKVideoTask(ctx context.Context, taskID string) string {
+	base := strings.TrimRight(a.entity.BaseURL, "/")
+	endpoint := base + "/contents/generations/tasks/" + taskID
+	for i := 0; i < 12; i++ { // ~60s at a 5s interval
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(5 * time.Second):
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return ""
+		}
+		req.Header.Set("Authorization", "Bearer "+a.firstSecret())
+		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			continue
+		}
+		var out struct {
+			Status   string `json:"status"`
+			URL      string `json:"url"`
+			VideoURL string `json:"video_url"`
+			Data     []struct {
+				URL string `json:"url"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &out) != nil {
+			continue
+		}
+		if u := out.VideoURL; u != "" {
+			return u
+		}
+		if u := out.URL; u != "" {
+			return u
+		}
+		if len(out.Data) > 0 && out.Data[0].URL != "" {
+			return out.Data[0].URL
+		}
+		st := strings.ToLower(out.Status)
+		if st == "failed" || st == "error" {
+			return ""
+		}
+		// "success" without a URL field we recognise, or queued/running: keep polling.
+	}
+	return ""
 }
 
 // ---- Models ----

@@ -123,6 +123,14 @@ async function generate() {
         <template v-else-if="result?.url">
           <video :src="result.url" class="res-video" controls />
         </template>
+        <template v-else-if="result?.task">
+          <div class="res-task">
+            <el-icon style="font-size: 30px; color: var(--ah-warn)"><Loading class="is-loading" /></el-icon>
+            <p>视频任务已提交，正在生成…</p>
+            <p class="dim">任务ID：{{ result.task }}</p>
+            <p class="dim">服务商生成成片需要一到几分钟；若长时间未返回，可稍后再次生成。</p>
+          </div>
+        </template>
         <el-empty v-else description="生成结果会显示在这里" />
       </el-card>
     </div>
@@ -164,6 +172,17 @@ async function generate() {
   align-items: center;
   gap: 8px;
   padding: 40px 0;
+}
+.res-task {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 0;
+  text-align: center;
+}
+.res-task p {
+  margin: 0;
 }
 .wait-hint {
   color: var(--ah-text-dim);
