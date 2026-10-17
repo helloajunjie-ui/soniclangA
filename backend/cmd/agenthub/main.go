@@ -152,6 +152,7 @@ func main() {
 		reg.Register(t)
 	}
 	builtin.InjectMemorySearcher(reg, mem.Searcher())
+	builtin.InjectAudit(reg, aud)
 	// Control capabilities join the same registry, so a role can grant them
 	// like any other tool. They refuse at execution time while the module is
 	// off, and the orchestrator's gate treats every control_* name as a

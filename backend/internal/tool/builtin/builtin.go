@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agenthub/agent-proxy/internal/audit"
 	"github.com/agenthub/agent-proxy/internal/tool"
 )
 
@@ -554,7 +555,12 @@ func htmlToText(html string) string {
 
 // ---- shell_exec (run system commands) ----
 
-type shellExecTool struct{}
+type shellExecTool struct {
+	// audit records every command before it runs. Not a risk judgement — it is
+	// traceability: the agent acted on the user's own machine, and afterwards
+	// "what did it actually run" has to be answerable (DESIGN §10.3).
+	audit *audit.Audit
+}
 
 func (shellExecTool) Name() string { return "shell_exec" }
 func (shellExecTool) Description() string {
@@ -571,7 +577,7 @@ func (shellExecTool) Schema() map[string]interface{} {
 	}
 }
 
-func (shellExecTool) Execute(ctx context.Context, args map[string]interface{}) (result string, err error) {
+func (t shellExecTool) Execute(ctx context.Context, args map[string]interface{}) (result string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = ""
@@ -590,6 +596,9 @@ func (shellExecTool) Execute(ctx context.Context, args map[string]interface{}) (
 	if timeout > 300 {
 		timeout = 300
 	}
+	if t.audit != nil {
+		t.audit.Log("tool.shell_exec", "", map[string]string{"command": truncateForAudit(cmdStr)})
+	}
 	// Enforce a hard wall-clock timeout with an independent context.
 	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
@@ -603,6 +612,22 @@ func (shellExecTool) Execute(ctx context.Context, args map[string]interface{}) (
 		return fmt.Sprintf("exit code: %v\n输出:\n%s", err, string(out)), nil
 	}
 	return string(out), nil
+}
+
+// truncateForAudit keeps the audit line readable: the command has to be
+// recognisable, not complete (a 100 KB one-liner would bury the log).
+func truncateForAudit(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if len(cmd) <= 300 {
+		return cmd
+	}
+	return cmd[:300] + "…(截断)"
+}
+
+// InjectAudit replaces shell_exec with a version that logs every command before
+// running it (called from main once the audit log exists).
+func InjectAudit(reg interface{ Register(t tool.Tool) }, a *audit.Audit) {
+	reg.Register(shellExecTool{audit: a})
 }
 
 // NewBuiltins returns the default built-in tool set.

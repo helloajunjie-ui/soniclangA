@@ -2,17 +2,18 @@ package builtin
 
 import (
 	"context"
+	"github.com/agenthub/agent-proxy/internal/audit"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// shell_exec is the only builtin that can actually change the machine, and it had
-// no guard at all: whatever the model emitted went straight to PowerShell. These
-// cases pin the deny list (fail-closed, matched before anything is spawned) and
-// — just as important — that ordinary commands still pass, since a deny list that
-// blocks real work gets switched off or worked around.
+// shell_exec is the only builtin that can change the machine. It is gated by the
+// permission tier (see the orchestrator's TestShellExecIsGatedByThePermissionTier)
+// and every call is audited; the cases here cover the tool's own behaviour.
 
 func TestExecuteEmptyCommand(t *testing.T) {
 	if _, err := (shellExecTool{}).Execute(context.Background(), map[string]interface{}{}); err == nil {
@@ -97,5 +98,40 @@ func TestGetTimeMentionsNow(t *testing.T) {
 	// The contract is RFC3339 (the model parses it); a prose date would not sort.
 	if _, err := time.Parse(time.RFC3339, out); err != nil {
 		t.Errorf("get_time = %q, want RFC3339", out)
+	}
+}
+
+// On the user's own machine the point is not to referee commands but to be able to
+// say afterwards what ran. Every shell_exec call is appended to the audit log
+// before it executes.
+func TestShellExecIsAudited(t *testing.T) {
+	if _, err := exec.LookPath("powershell"); err != nil {
+		t.Skip("powershell not available")
+	}
+	dir := t.TempDir()
+	a := audit.New(dir)
+	tool := shellExecTool{audit: a}
+	if _, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": `Write-Output audit-probe`,
+	}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if !strings.Contains(string(b), "tool.shell_exec") || !strings.Contains(string(b), "audit-probe") {
+		t.Errorf("command was not audited: %s", string(b))
+	}
+}
+
+func TestAuditTruncatesLongCommands(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	got := truncateForAudit(long)
+	if len(got) > 320 || !strings.HasSuffix(got, "…(截断)") {
+		t.Errorf("long command not truncated: len=%d tail=%q", len(got), got[len(got)-10:])
+	}
+	if truncateForAudit("  echo hi  ") != "echo hi" {
+		t.Error("short command was altered")
 	}
 }
