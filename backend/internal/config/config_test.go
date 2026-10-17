@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -173,5 +174,24 @@ func TestNonLoopbackAddrRequiresToken(t *testing.T) {
 				t.Errorf("error should suggest a loopback address to use, got: %v", err)
 			}
 		})
+	}
+}
+
+// A desktop launch must not depend on the working directory: "./data" resolves
+// against whatever folder the shortcut was started from, so the default has to be
+// a per-user path.
+func TestDefaultDataDirIsPerUser(t *testing.T) {
+	dir := DefaultDataDir()
+	if dir == "" {
+		t.Fatal("empty default data dir")
+	}
+	if dir == "./data" || dir == "data" {
+		t.Skip("no user config dir on this machine; falls back to ./data")
+	}
+	if !filepath.IsAbs(dir) {
+		t.Errorf("default data dir is not absolute: %q", dir)
+	}
+	if !strings.Contains(strings.ToLower(dir), "agenthub") {
+		t.Errorf("default data dir does not name the app: %q", dir)
 	}
 }

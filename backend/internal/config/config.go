@@ -104,7 +104,11 @@ func Defaults() Settings {
 func Parse() (*Config, error) {
 	c := &Config{Settings: Defaults()}
 	fs := flag.NewFlagSet("agenthub", flag.ContinueOnError)
-	fs.StringVar(&c.DataDir, "data", "./data", "data directory (json store + vault)")
+	// Left empty by default: a relative "./data" resolves against whatever
+	// directory the process happened to start in, which for a desktop launch is
+	// the shortcut working directory — the data (vault, conversations) would land
+	// somewhere the user never looks. The default is resolved after parsing.
+	fs.StringVar(&c.DataDir, "data", "", "data directory (json store + vault)")
 	fs.StringVar(&c.Addr, "addr", "127.0.0.1:8787", "listen address")
 	fs.StringVar(&c.Token, "token", "", "auth token for non-localhost / shared access (optional)")
 	fs.BoolVar(&c.Dev, "dev", false, "serve frontend from disk instead of embedded dist")
@@ -118,6 +122,11 @@ func Parse() (*Config, error) {
 	fs.Visit(func(f *flag.Flag) { c.overrides[f.Name] = f.Value.String() })
 	if v := os.Getenv("AGENTHUB_DATA"); v != "" {
 		c.DataDir = v
+	}
+	// No explicit directory: pick a per-user one, so a desktop launch keeps its
+	// data in the same place regardless of the working directory.
+	if c.DataDir == "" {
+		c.DataDir = DefaultDataDir()
 	}
 	if v := os.Getenv("AGENTHUB_ADDR"); v != "" {
 		c.Addr = v
@@ -417,4 +426,14 @@ func (c *Config) Audit() []string {
 		warns = append(warns, "autoRoute.threshold should be within (0,1]")
 	}
 	return warns
+}
+
+// DefaultDataDir is where data lives when the user did not name a directory:
+// the per-user config folder (roaming on Windows), so a packaged app keeps its
+// data next to the user profile instead of wherever the shortcut started.
+func DefaultDataDir() string {
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "AgentHub", "data")
+	}
+	return "./data"
 }
