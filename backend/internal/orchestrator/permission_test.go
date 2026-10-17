@@ -164,3 +164,18 @@ func TestFlowToolsRunAtTheDefaultTier(t *testing.T) {
 	// The loosening is specific, not a general "ask now allows everything".
 	blocked(t, g, "write_file")
 }
+
+// shell_exec stays out of the read-only set on purpose: it is the one builtin
+// that can change the machine, so at the default (ask) tier it must be refused
+// and the human has to raise the tier. There is deliberately no built-in
+// blacklist of "dangerous" commands — which commands are acceptable is the
+// user's decision, not the product's (DESIGN §17 原则九/十一).
+func TestShellExecIsGatedByThePermissionTier(t *testing.T) {
+	g := permissionGate(&role.Role{}, nil) // unset permission == ask
+	blocked(t, g, "shell_exec")
+	blocked(t, g, "write_file")
+
+	// Raising the tier to full is the human saying "I authorize this".
+	gFull := permissionGate(&role.Role{Permission: PermFull}, nil)
+	allowed(t, gFull, "shell_exec")
+}

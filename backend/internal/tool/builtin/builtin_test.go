@@ -14,66 +14,6 @@ import (
 // — just as important — that ordinary commands still pass, since a deny list that
 // blocks real work gets switched off or worked around.
 
-func TestBlockedCommandsAreRefused(t *testing.T) {
-	dangerous := []string{
-		`format c: /q`,
-		`diskpart`,
-		`mkfs.ext4 /dev/sda1`,
-		`dd if=/dev/zero of=/dev/sda bs=1M`,
-		`rm -rf /`,
-		`rm -rf ~`,
-		`Remove-Item -Path "C:\" -Recurse -Force`,
-		`del /s /q C:\Windows\Temp`,
-		`shutdown /r /t 0`,
-		`Stop-Computer -Force`,
-		`bcdedit /set {default} safeboot minimal`,
-		`vssadmin delete shadows /all /quiet`,
-		`cipher /w:C:\`,
-		`reg delete HKLM\SOFTWARE\Microsoft /f`,
-		`net user attacker P@ss /add`,
-	}
-	for _, cmd := range dangerous {
-		if _, blocked := blockedCommand(cmd); !blocked {
-			t.Errorf("not blocked: %q", cmd)
-		}
-	}
-}
-
-func TestOrdinaryCommandsPassTheGuard(t *testing.T) {
-	ok := []string{
-		`Get-ChildItem E:\work`,
-		`echo hello`,
-		`where python`,
-		`Get-Process | Select-Object -First 5`,
-		`python script.py`,
-		`blender --background --python build.py`,
-		// Mentions the word without doing the deed.
-		`Get-Content format.md`,
-		`Get-Help Remove-Item`,
-	}
-	for _, cmd := range ok {
-		if why, blocked := blockedCommand(cmd); blocked {
-			t.Errorf("over-blocked %q as %q", cmd, why)
-		}
-	}
-}
-
-// The refusal has to explain itself, or the model retries the same command.
-func TestExecuteRefusesDestructiveCommand(t *testing.T) {
-	out, err := shellExecTool{}.Execute(context.Background(), map[string]interface{}{
-		"command": `format c: /q`,
-	})
-	if err == nil {
-		t.Fatalf("format was executed, output: %q", out)
-	}
-	if !strings.Contains(err.Error(), "格式化磁盘") {
-		t.Errorf("error does not name the rule: %v", err)
-	}
-	if out != "" {
-		t.Errorf("a refused command produced output: %q", out)
-	}
-}
-
 func TestExecuteEmptyCommand(t *testing.T) {
 	if _, err := (shellExecTool{}).Execute(context.Background(), map[string]interface{}{}); err == nil {
 		t.Fatal("empty command returned no error")
