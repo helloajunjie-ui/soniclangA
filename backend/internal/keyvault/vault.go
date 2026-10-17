@@ -31,10 +31,19 @@ type Vault struct {
 const keyFile = "vault.key"
 
 // New loads or generates the machine key under dataDir/vault.
+//
+// Both the vault directory and vault.key are locked down to the service account
+// (hardenPath): the 0700/0600 modes below are advisory on Windows and the file
+// would otherwise inherit whatever the parent directory grants, which is the
+// difference between "the API keys are encrypted" and "the API keys are
+// encrypted against other accounts on this machine" (DESIGN §10.1).
 func New(dataDir string) (*Vault, error) {
 	dir := filepath.Join(dataDir, "vault")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
+	}
+	if err := hardenPath(dir, true); err != nil {
+		warnHardening(dir, err)
 	}
 	v := &Vault{dir: dir}
 	kf := filepath.Join(dir, keyFile)
@@ -53,6 +62,12 @@ func New(dataDir string) (*Vault, error) {
 			return nil, err
 		}
 		v.key = k
+	}
+	// Re-harden on every boot, not only on creation: an existing vault.key from
+	// an older build still carries the inherited ACL it was created with, and
+	// that is the common case for anyone upgrading.
+	if err := hardenPath(kf, false); err != nil {
+		warnHardening(kf, err)
 	}
 	return v, nil
 }
