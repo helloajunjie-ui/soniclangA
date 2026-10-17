@@ -142,9 +142,13 @@ Element Plus **按需引入**（`vite.config.ts` 里的 `unplugin-vue-components
 
 ## 文档
 
-- 设计文档 `DESIGN.md`（架构与十一原则）与 `UI-AUDIT.md` **不在本仓库内**，
-  源码注释里的 `DESIGN §x` 引用指向它们。仓库内的说明只有本 README 与
-  `tools/README.md`（各演练脚本的用途与步骤）。
+- 架构与设计：[`../docs/DESIGN.md`](../docs/DESIGN.md)（需求理解、模块划分、接口契约、
+  实现状态与已知偏差、界面可见性十一原则）。
+- 界面审计：[`../docs/UI-AUDIT.md`](../docs/UI-AUDIT.md)。
+
+源码注释里的 `DESIGN §x` 引用全部指向 `DESIGN.md` 的实际章节（33 个不同的章节号，逐一核对过）。
+注意这两份文档位于**仓库上一级目录**的 `docs/`，因此不随本仓库分发，也不在任何版本控制里
+—— 只 clone 这个仓库是拿不到它们的。
 
 ## License
 
