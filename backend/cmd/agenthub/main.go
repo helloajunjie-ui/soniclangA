@@ -7,15 +7,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -300,6 +304,16 @@ func main() {
 			log.Printf("modules: persist switches failed: %v", err)
 		}
 	}
+	// Desktop launches: the packaged app cannot assume 8787 is free, and the shell
+	// needs to know which port was actually used. Pick a free port when the
+	// configured one is taken, and publish the result for the shell to read.
+	if free, perr := pickFreeAddr(cfg.Addr); perr != nil {
+		log.Printf("警告：端口探测失败（%v），沿用 %s", perr, cfg.Addr)
+	} else if free != cfg.Addr {
+		log.Printf("端口 %s 已被占用，改用 %s", cfg.Addr, free)
+		cfg.Addr = free
+	}
+	writeRuntimeFile(cfg)
 	srv := server.New(h, cfg.Addr)
 
 	// Memory consolidation used to have exactly one trigger: the button in the UI.
@@ -453,4 +467,39 @@ func controlEnabledAtBoot(disabled []string, id string) bool {
 		}
 	}
 	return true // enabled by default unless explicitly switched off
+}
+
+// pickFreeAddr returns addr, or the next free port after it when it is taken.
+// A packaged desktop app has no console to report "address already in use", and
+// two instances fighting over one port is the common case (double click).
+func pickFreeAddr(addr string) (string, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return addr, err
+	}
+	for i := 0; i < 10; i++ {
+		candidate := net.JoinHostPort(host, strconv.Itoa(port+i))
+		ln, err := net.Listen("tcp", candidate)
+		if err == nil {
+			_ = ln.Close()
+			return candidate, nil
+		}
+	}
+	return addr, fmt.Errorf("从 %s 起的 10 个端口都被占用", addr)
+}
+
+// writeRuntimeFile publishes the address the shell should open. The Electron main
+// process waits for this file instead of guessing the port.
+func writeRuntimeFile(cfg *config.Config) {
+	path := filepath.Join(cfg.DataDir, "runtime.json")
+	body, _ := json.MarshalIndent(map[string]interface{}{
+		"addr": cfg.Addr, "url": "http://" + cfg.Addr, "pid": os.Getpid(),
+	}, "", "  ")
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		log.Printf("写 runtime.json 失败：%v", err)
+	}
 }
