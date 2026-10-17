@@ -141,6 +141,14 @@ func (h *Handler) mcpServers(w http.ResponseWriter, r *http.Request, p string) {
 		return
 	}
 	switch {
+	case p == "/api/v1/mcp/sources" || p == "/api/v1/mcp/sources/":
+		// Public registries, shown as "更多 MCP": discovery links, not installable
+		// entries (each one aggregates vendors we have not reviewed).
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.json(w, 200, h.MCP.Sources())
 	case p == "/api/v1/mcp/catalog" || p == "/api/v1/mcp/catalog/":
 		// The known-good list. Each entry is a git/npm/pypi source that npx/uvx
 		// fetches on first run, so "install" is just recording the launch line.

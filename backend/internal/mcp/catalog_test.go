@@ -129,3 +129,26 @@ func TestInstallSubstitutesPlaceholders(t *testing.T) {
 		t.Errorf("DIR env = %q", srv.Env["DIR"])
 	}
 }
+
+// Discovery links must be real https URLs: the panel renders them as-is, and a
+// typo would only show up as a dead link in the UI.
+func TestSourcesAreWellFormed(t *testing.T) {
+	m := &Manager{}
+	list := m.Sources()
+	if len(list) < 5 {
+		t.Fatalf("only %d sources", len(list))
+	}
+	seen := map[string]bool{}
+	for _, s := range list {
+		if s.Name == "" || s.Description == "" {
+			t.Errorf("source %q is missing a name/description", s.URL)
+		}
+		if !strings.HasPrefix(s.URL, "https://") {
+			t.Errorf("%s: url %q is not https", s.Name, s.URL)
+		}
+		if seen[s.URL] {
+			t.Errorf("duplicate url %q", s.URL)
+		}
+		seen[s.URL] = true
+	}
+}
