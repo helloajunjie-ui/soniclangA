@@ -34,12 +34,12 @@ import (
 	"github.com/agenthub/agent-proxy/internal/module"
 	"github.com/agenthub/agent-proxy/internal/orchestrator"
 	"github.com/agenthub/agent-proxy/internal/provider"
-	"github.com/agenthub/agent-proxy/internal/rea"
 	"github.com/agenthub/agent-proxy/internal/role"
 	"github.com/agenthub/agent-proxy/internal/skill"
 	"github.com/agenthub/agent-proxy/internal/tool/registry"
 	"github.com/agenthub/agent-proxy/internal/tool/sandbox"
 	"github.com/agenthub/agent-proxy/internal/util"
+	"github.com/agenthub/agent-proxy/internal/workspace"
 )
 
 // Handler holds every service and the orchestrator.
@@ -53,7 +53,6 @@ type Handler struct {
 	Memory    *memory.Service
 	Method    *methodology.Service
 	Control   *control.Service
-	REA       *rea.Service
 	Tools     *registry.Registry
 	Jobs      *job.Service
 	Ingest    *ingest.Worker
@@ -78,12 +77,12 @@ type Handler struct {
 // New constructs a Handler and a static file server for the embedded dist.
 func New(cfg *config.Config, prov *provider.Service, roles *role.Service, convs *conversation.Service,
 	sk *skill.Service, know *knowledge.Service, mem *memory.Service, meth *methodology.Service,
-	ctrl *control.Service, reaSvc *rea.Service, tools *registry.Registry, jobs *job.Service,
+	ctrl *control.Service, tools *registry.Registry, jobs *job.Service,
 	ing *ingest.Worker, orch *orchestrator.Orchestrator, ex *extract.Extractor,
 	cons *consolidate.Worker, static http.Handler) *Handler {
 	return &Handler{
 		Cfg: cfg, Providers: prov, Roles: roles, Convs: convs, Skills: sk,
-		Knowledge: know, Memory: mem, Method: meth, Control: ctrl, REA: reaSvc,
+		Knowledge: know, Memory: mem, Method: meth, Control: ctrl,
 		Tools: tools, Jobs: jobs, Ingest: ing, Orch: orch,
 		Extractor: ex, Consolidate: cons, static: static,
 		log: logx.Default(),
@@ -2001,6 +2000,9 @@ func (h *Handler) generations(w http.ResponseWriter, r *http.Request, p string) 
 			ProviderID string `json:"providerId"`
 			Model      string `json:"model"`
 			Prompt     string `json:"prompt"`
+			// ConversationID, when present, puts the saved pictures into that task
+			// workspace instead of the global images/ folder.
+			ConversationID string `json:"conversationId"`
 			provider.ImageOpts
 		}
 		if err := h.decode(r, &body); err != nil {
@@ -2029,7 +2031,7 @@ func (h *Handler) generations(w http.ResponseWriter, r *http.Request, p string) 
 		// Auto-save generated pictures to the local data dir so the user's work
 		// is never lost even if the upstream URL expires (TOS links do).
 		if res != nil && (res.URL != "" || len(res.Images) > 0) {
-			h.saveImagesLocal(res)
+			h.saveImagesLocal(res, body.ConversationID)
 		}
 		h.json(w, 200, map[string]interface{}{"ok": true, "result": res})
 		return
@@ -2106,8 +2108,29 @@ func (h *Handler) settings(w http.ResponseWriter, r *http.Request) {
 // result survives the upstream TOS link's 24h expiry. Failures are silent:
 // the picture still returned to the UI via the live URL, we just could not
 // keep a copy. Only the first image is used for LocalPath to keep it simple.
-func (h *Handler) saveImagesLocal(res *provider.ImageResult) {
-	dir := filepath.Join(h.Cfg.DataDir, "images")
+// saveImagesLocal keeps generated pictures on disk: upstream URLs expire (TOS links
+// do), and a picture the user generated should not vanish with them.
+//
+// With a conversation id the pictures land in that task workspace
+// (workspace/images/), beside the rest of the artifacts; otherwise they keep
+// going to the global images/ folder.
+func (h *Handler) saveImagesLocal(res *provider.ImageResult, convID string) {
+	dir := ""
+	if convID != "" {
+		if conv, err := h.Convs.Get(convID); err == nil {
+			if ws, err := workspace.Resolve(h.Cfg.DataDir, conv.ID, conv.WorkspaceDir); err == nil {
+				if sub, err := workspace.Subdir(ws, workspace.KindImages); err == nil {
+					dir = sub
+				}
+			}
+		}
+	}
+	if dir == "" {
+		dir = filepath.Join(h.Cfg.DataDir, "images")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
