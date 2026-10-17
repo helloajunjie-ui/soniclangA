@@ -17,9 +17,38 @@ backend/data*/agenthub.db-wal
 *.out
 
 # Frontend build output
+#
+# 前端产物不进版本库：它是 `npm run build` 的产物，文件名带内容 hash，每次
+# 改一行源码就会整批换名。历史上它被跟踪 + 手工拷贝同步，结果 embed 目录堆到
+# 1658 个文件 / 141 MB，全部打进 exe（167 MB）。
+#
+# 唯一的例外是 favicon.svg：它由 frontend/public/ 原样拷入，内容稳定，
+# 留作 `//go:embed all:dist` 的锚点 —— 没有它，全新 clone 直接 `go build`
+# 会因为"没有任何文件可嵌入"而编译失败。
+/backend/internal/server/dist/*
+!/backend/internal/server/dist/favicon.svg
 frontend/dist/
 node_modules/
 
 # OS / editor
 .DS_Store
 *.swp
+
+# 临时产物：编译/构建输出重定向、curl 转储、调试脚本输出
+# （历史上这些东西在仓库根和 backend/ frontend/ 下堆了 80 多个文件）
+/build_*.txt
+/build_*.log
+/test_*.txt
+/*.txt
+backend/build_*.txt
+backend/test_*.txt
+frontend/build_*.txt
+*.log
+
+# Python 调试脚本产物
+__pycache__/
+*.pyc
+.venv/
+
+# build.ps1 把 TEMP 重定向到这里（系统 %TEMP% 对子进程不可写）
+.tmp/

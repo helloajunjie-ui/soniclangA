@@ -13,7 +13,9 @@ const providerId = ref('')
 const model = ref('')
 const prompt = ref('')
 const busy = ref(false)
-const result = ref<{ url?: string; model?: string } | null>(null)
+// 后端 provider.VideoResult 的字段是 url / taskId / model（见 backend/internal/provider/provider.go）；
+// 异步服务商只回 taskId，视频要稍后才能通过它查到。
+const result = ref<{ url?: string; taskId?: string; model?: string } | null>(null)
 const error = ref('')
 
 const VIDEO_KW = /sora|luma|pika|kling|runway|video|t2v|i2v|vid|pixverse|hailuo/i
@@ -123,11 +125,11 @@ async function generate() {
         <template v-else-if="result?.url">
           <video :src="result.url" class="res-video" controls />
         </template>
-        <template v-else-if="result?.task">
+        <template v-else-if="result?.taskId">
           <div class="res-task">
             <el-icon style="font-size: 30px; color: var(--ah-warn)"><Loading class="is-loading" /></el-icon>
             <p>视频任务已提交，正在生成…</p>
-            <p class="dim">任务ID：{{ result.task }}</p>
+            <p class="dim">任务ID：{{ result.taskId }}</p>
             <p class="dim">服务商生成成片需要一到几分钟；若长时间未返回，可稍后再次生成。</p>
           </div>
         </template>
