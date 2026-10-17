@@ -709,9 +709,11 @@ func (h *Handler) conversations(w http.ResponseWriter, r *http.Request, p string
 			h.json(w, 200, list)
 		case http.MethodPost:
 			var body struct {
-				RoleID string            `json:"roleId"`
-				Mode   string            `json:"mode"`
-				Vars   map[string]string `json:"vars"`
+				RoleID string `json:"roleId"`
+				// WorkspaceDir lets the user pick where this task artifacts go.
+				WorkspaceDir string            `json:"workspaceDir"`
+				Mode         string            `json:"mode"`
+				Vars         map[string]string `json:"vars"`
 			}
 			_ = h.decode(r, &body)
 			if body.RoleID == "" {
@@ -738,6 +740,18 @@ func (h *Handler) conversations(w http.ResponseWriter, r *http.Request, p string
 				}
 			}
 			c, err := h.Convs.Create(body.RoleID, conversation.Mode(body.Mode))
+			if body.WorkspaceDir != "" {
+				// Reject a bad path now, not on the first tool call of the task.
+				if _, wsErr := workspace.Resolve(h.Cfg.DataDir, c.ID, body.WorkspaceDir); wsErr != nil {
+					h.json(w, 400, map[string]interface{}{"error": wsErr.Error()})
+					return
+				}
+				c.WorkspaceDir = body.WorkspaceDir
+				if err := h.Convs.UpdateMeta(c.ID, conversation.MetaPatch{WorkspaceDir: &body.WorkspaceDir}); err != nil {
+					h.json(w, 201, map[string]interface{}{"conversation": c, "workspaceWarning": "工作空间保存失败：" + err.Error()})
+					return
+				}
+			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

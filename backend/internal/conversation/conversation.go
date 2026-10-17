@@ -205,6 +205,8 @@ type MetaPatch struct {
 	Mode              *Mode   `json:"mode,omitempty"`
 	Permission        *string `json:"permission,omitempty"`
 	DefaultProviderId *string `json:"defaultProviderId,omitempty"`
+	// WorkspaceDir pins this task to a directory the user chose.
+	WorkspaceDir *string `json:"workspaceDir,omitempty"`
 }
 
 // Service manages conversations.
@@ -328,6 +330,9 @@ func (s *Service) UpdateMeta(id string, patch MetaPatch) error {
 	if patch.DefaultProviderId != nil {
 		c.DefaultProviderId = *patch.DefaultProviderId
 	}
+	if patch.WorkspaceDir != nil {
+		c.WorkspaceDir = *patch.WorkspaceDir
+	}
 	c.UpdatedAt = time.Now().UnixMilli()
 	return s.store.Save(id, c)
 }
@@ -371,11 +376,6 @@ func (s *Service) Messages(id string) ([]Message, error) {
 		}
 	}
 	return out, nil
-}
-
-// StreamMessages is reserved for live replay/subscription (M2: not implemented).
-func (s *Service) StreamMessages(id string, sinceSeq int64) (<-chan Message, error) {
-	return nil, nil
 }
 
 // TrimMessages deletes the message msgID and everything after it, then fixes
