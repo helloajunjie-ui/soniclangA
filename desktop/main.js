@@ -30,6 +30,21 @@ function log(...parts) {
   } catch (_) { /* logging must never break startup */ }
 }
 
+// A path with non-ASCII characters is the single most common cause of a desktop
+// start that produces no window (the NSIS self-extractor fails outright there, and
+// the app itself is more reliable elsewhere). Detect it once and carry the hint into
+// every failure message instead of making the user guess.
+function nonASCIIPath() {
+  const p = path.dirname(process.execPath);
+  return /[^\x00-\x7F]/.test(p) ? p : null;
+}
+
+function pathHint() {
+  const bad = nonASCIIPath();
+  if (!bad) return '';
+  return '\n\n检测到当前目录含非 ASCII 字符：\n' + bad +
+    '\n\n请把整个文件夹移动到纯英文路径后重试，例如：\nC:\\AgentHub\\';
+}
 function backendPath() {
   return isDev
     ? path.join(__dirname, '..', 'backend', 'agenthub.exe')
@@ -48,7 +63,7 @@ function runtimeFile() {
 function fail(title, detail) {
   log('FATAL', title, detail || '');
   try {
-    dialog.showErrorBox(title, (detail || '') + '\n\n日志：' + (logFile || '(日志未创建)'));
+    dialog.showErrorBox(title, (detail || '') + '\n\n日志：' + (logFile || '(日志未创建)') + pathHint());
   } catch (_) {}
   quitting = true;
   app.quit();
@@ -180,6 +195,9 @@ function buildTray() {
 }
 
 log('=== AgentHub desktop starting ===', 'dev =', isDev);
+if (nonASCIIPath()) {
+  log('WARN 当前目录含非 ASCII 字符，可能出现启动失败：', nonASCIIPath());
+}
 
 if (!app.requestSingleInstanceLock()) {
   log('another instance is running; focusing it and exiting');
