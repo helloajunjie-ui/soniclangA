@@ -367,7 +367,12 @@ func main() {
 		}()
 	}
 
-	systray.Run(onReady, onExit)
+	if os.Getenv("AGENTHUB_NO_SYSTRAY") != "" {
+		// The desktop shell owns the tray; a second icon would fight it.
+		log.Printf("已禁用内置托盘（AGENTHUB_NO_SYSTRAY 已设置）")
+	} else {
+		systray.Run(onReady, onExit)
+	}
 	// Two ways out of systray.Run, and they need opposite handling:
 	//   - the user chose 退出: onExit already ran, so the process must actually end.
 	//     Waiting on a signal here used to leave a headless zombie (no tray, no
