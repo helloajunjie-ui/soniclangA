@@ -570,6 +570,54 @@ func (shellExecTool) Schema() map[string]interface{} {
 		"required": []string{"command"},
 	}
 }
+
+// blockedCommands is the fail-closed deny list for shell_exec.
+//
+// This is a guard rail, not a sandbox: it stops the irreversible, obviously
+// system-level commands (formatting, system-wide recursive deletes, shutdown,
+// boot/registry/ACL tampering, account creation) that no user asks an assistant
+// for. Anything the model spells differently still runs — which is why the tool
+// description says it acts on the user's machine and why the orchestrator's
+// permission tier gates it. Refusing locally is cheaper than explaining a wiped
+// disk.
+var blockedCommands = []struct {
+	re  *regexp.Regexp
+	why string
+}{
+	{regexp.MustCompile(`(?i)\bformat(\.com)?\s+[a-z]:`), "格式化磁盘"},
+	{regexp.MustCompile(`(?i)\bdiskpart\b`), "分区操作"},
+	{regexp.MustCompile(`(?i)\bmkfs(\.\w+)?\b`), "格式化文件系统"},
+	{regexp.MustCompile(`(?i)\bdd\b[^\n]*\bof\s*=\s*/dev/`), "直接写块设备"},
+	{regexp.MustCompile(`(?i)\brm\s+(-[a-z]*[rf][a-z]*\s+)+(/|/\*|~)`), "递归删除根目录"},
+
+	{regexp.MustCompile(`(?i)\bdel\b[^\n]*/s[^\n]*/q`), "递归静默删除"},
+	{regexp.MustCompile(`(?i)\b(shutdown|stop-computer|restart-computer)\b`), "关机或重启"},
+	{regexp.MustCompile(`(?i)\bbcdedit\b`), "修改启动配置"},
+	{regexp.MustCompile(`(?i)\bvssadmin\b[^\n]*\bdelete\b`), "删除卷影副本"},
+	{regexp.MustCompile(`(?i)\bcipher\b[^\n]*/w`), "擦除磁盘空闲空间"},
+	{regexp.MustCompile(`(?i)\breg\b[^\n]*\bdelete\b[^\n]*\bhklm\b`), "删除注册表系统项"},
+	{regexp.MustCompile(`(?i)\b(net\s+user|net\s+localgroup)\b[^\n]*/add`), "创建账户或加组"},
+}
+
+// driveRoot matches a bare drive target such as `c:`, `c:\`, `"c:\"` — argument
+// order in a recursive delete is not fixed, so this is checked separately from
+// the regex list.
+var driveRoot = regexp.MustCompile(`[a-z]:[\\/]?["'\s]|[a-z]:[\\/]?$`)
+
+// blockedCommand reports whether the command matches the deny list.
+func blockedCommand(cmd string) (string, bool) {
+	for _, b := range blockedCommands {
+		if b.re.MatchString(cmd) {
+			return b.why, true
+		}
+	}
+	low := strings.ToLower(cmd)
+	if strings.Contains(low, "remove-item") && strings.Contains(low, "-recurse") && driveRoot.MatchString(low) {
+		return "递归删除系统盘", true
+	}
+	return "", false
+}
+
 func (shellExecTool) Execute(ctx context.Context, args map[string]interface{}) (result string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -580,6 +628,10 @@ func (shellExecTool) Execute(ctx context.Context, args map[string]interface{}) (
 	cmdStr, _ := args["command"].(string)
 	if cmdStr == "" {
 		return "", errors.New("command 不能为空")
+	}
+	// Fail closed before anything is spawned.
+	if why, blocked := blockedCommand(cmdStr); blocked {
+		return "", fmt.Errorf("拒绝执行：命令被判为「%s」，属于系统级破坏性操作；如果是你确实想做的，请用户自己执行", why)
 	}
 	timeout := 30
 	if v, ok := args["timeout"].(float64); ok && v > 0 {
