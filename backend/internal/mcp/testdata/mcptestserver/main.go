@@ -111,6 +111,13 @@ func main() {
 				},
 			}})
 		case "tools/call":
+			// MCPTEST_HANG=1 models the server that completes the handshake and
+			// then goes quiet: no reply, no exit. Before the client learned to
+			// honour its context, such a server parked the reader forever while
+			// holding callMu, and every later call blocked behind it.
+			if os.Getenv("MCPTEST_HANG") == "1" {
+				select {} // sleep forever, keeping stdin open
+			}
 			var ms int
 			if v := os.Getenv("MCPTEST_SLOW_MS"); v != "" {
 				ms, _ = strconv.Atoi(v)

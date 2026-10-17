@@ -545,3 +545,64 @@ func TestStopAll(t *testing.T) {
 		t.Fatal("StopAll must unregister every proxied tool")
 	}
 }
+
+// A server that completes the handshake and then never answers used to park the
+// reader inside call() forever while holding callMu: the 120s CallTimeout was
+// applied to a context nothing consulted, every later tools/call and /start
+// blocked on that mutex, and the whole MCP surface wedged until restart.
+func TestCallToolReturnsWhenTheServerNeverAnswers(t *testing.T) {
+	cl, err := Start(context.Background(), Config{
+		Command: serverBin,
+		Env:     map[string]string{"MCPTEST_HANG": "1"},
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer cl.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if _, err := cl.CallTool(ctx, "echo", map[string]interface{}{"text": "hi"}); err == nil {
+		t.Fatal("a silent server produced no error")
+	}
+	if took := time.Since(start); took > 10*time.Second {
+		t.Fatalf("the call ignored its deadline and returned after %s", took)
+	}
+}
+
+// Two sequential calls must not deadlock on callMu when the first one is
+// abandoned: the mutex is released with the call, not with the server.
+func TestAbandonedCallReleasesTheLock(t *testing.T) {
+	cl, err := Start(context.Background(), Config{
+		Command: serverBin,
+		Env:     map[string]string{"MCPTEST_SLOW_MS": "50"},
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer cl.Close()
+
+	// First call: already-expired deadline.
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cl.CallTool(expired, "echo", map[string]interface{}{"text": "a"}); err == nil {
+		t.Fatal("an expired deadline produced no error")
+	}
+
+	// Second call must still work (or fail cleanly because the client closed the
+	// hung process), but it must not hang.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctx, c2 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c2()
+		_, _ = cl.CallTool(ctx, "echo", map[string]interface{}{"text": "b"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the second call blocked: callMu was never released")
+	}
+}

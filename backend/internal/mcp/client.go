@@ -359,7 +359,7 @@ func (c *Client) call(ctx context.Context, method string, params interface{}) (j
 		default:
 		}
 
-		line, err := readLine(c.rd, 8<<20)
+		line, err := c.readLineCtx(ctx)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil, ErrNotRunning
@@ -382,6 +382,38 @@ func (c *Client) call(ctx context.Context, method string, params interface{}) (j
 			return nil, resp.Error
 		}
 		return resp.Result, nil
+	}
+}
+
+// readLineCtx reads one line from the server's stdout while honouring ctx.
+//
+// A plain read cannot be interrupted: a server that starts but never answers
+// (crashed after handshake, waiting on a prompt, deadlocked) parked the reader
+// forever while holding callMu — every later tools/call and /start then blocked
+// on that mutex, and the 120s CallTimeout never fired because it was applied to a
+// context nothing consulted.
+//
+// The read runs in its own goroutine and we join it before returning either way,
+// so the single-reader invariant still holds (only one goroutine ever reads
+// stdout). On cancellation the process is closed — a peer that ignored its
+// deadline is not usable — which makes the pending read return.
+func (c *Client) readLineCtx(ctx context.Context) ([]byte, error) {
+	type readResult struct {
+		line []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		line, err := readLine(c.rd, 8<<20)
+		ch <- readResult{line, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.line, r.err
+	case <-ctx.Done():
+		_ = c.Close() // unblocks the pending read by closing the pipes
+		<-ch          // join, so the goroutine cannot steal the next line
+		return nil, ctx.Err()
 	}
 }
 
