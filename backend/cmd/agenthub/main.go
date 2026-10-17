@@ -126,11 +126,9 @@ func main() {
 			log.Printf("已从 methodology.json 导入 %d 条方法论", n)
 		}
 	}
-	// Software control (DESIGN §9.1, the "first capability") and the REA
-	// auxiliary toolkit (§9.2). Control ships disabled: the operator must flip
-	// the module switch before a single window can be enumerated, and the
-	// built-in deny list is enforced regardless of that switch.
-	reaSvc := rea.New(false)
+	// Software control (DESIGN §9.1, the "first capability"). It ships disabled:
+	// the operator must flip the module switch before a single window can be
+	// enumerated, and the built-in deny list is enforced regardless of that switch.
 	jobs := job.New(openNS("jobs"))
 	ing := ingest.New(know, jobs, filepath.Join(knowBase, "stage"))
 	cons := consolidate.New(mem, prov, jobs)
@@ -153,6 +151,9 @@ func main() {
 	}
 	builtin.InjectMemorySearcher(reg, mem.Searcher())
 	builtin.InjectAudit(reg, aud)
+	// Software without an API/CLI: REA records the few steps that work once, so the
+	// model stops rediscovering the same window controls on every turn.
+	rea.New(filepath.Join(cfg.DataDir, "rea")).RegisterTools(reg)
 	// Control capabilities join the same registry, so a role can grant them
 	// like any other tool. They refuse at execution time while the module is
 	// off, and the orchestrator's gate treats every control_* name as a
@@ -288,7 +289,7 @@ func main() {
 	// surprise at execution time.
 	orch.ControlGate = ctrl.ToolGate
 
-	h := handler.New(cfg, prov, roles, convs, skills, know, mem, meth, ctrl, reaSvc, reg, jobs, ing, orch, ex, cons, server.StaticHandler())
+	h := handler.New(cfg, prov, roles, convs, skills, know, mem, meth, ctrl, reg, jobs, ing, orch, ex, cons, server.StaticHandler())
 	h.Modules = mods
 	h.Briefs = briefs
 	h.Scripts = scripts

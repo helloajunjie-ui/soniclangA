@@ -218,6 +218,9 @@ const toolGuidanceText = `<tool_guidance>
 | http_fetch | 原始 HTTP 请求 | 调试 API、抓 JSON 接口时 |
 | memory_search | 搜索长期记忆 | 需要回忆用户之前说过的偏好/事实时 |
 | conversation_search | 搜索对话历史 | 需要翻之前聊过什么时 |
+| rea_list | 已录制的软件接口 | 任务涉及没有 API/CLI 的桌面软件时先查 |
+| rea_save | 固化某软件的操作步骤 | 试通一次之后存档案 |
+| rea_plan | 取某 action 的步骤清单 | 复用已录档案，按清单调 control_* 或 http_fetch |
 
 ## 硬规则
 
@@ -226,6 +229,7 @@ const toolGuidanceText = `<tool_guidance>
 - web_fetch / http_fetch 返回 403 或超时：不要重复抓同一个 URL，改用 web_search。
 - shell_exec 用 ; 或 | 合并多条命令，不要连着发多次。
 - 流程、结构或多步依赖适合用 mermaid 图；一两句话说清的不画。
+- 桌面软件没有 API/CLI 时：先探本机端口与脚本入口，再 rea_list 查档案；都没有才现场 control_inspect，试通后用 rea_save 固化，之后每次 rea_plan 复用。模拟点击是最后手段，不是首选。
 </tool_guidance>`
 
 // prompt. Like the knowledge block it is explicitly framed as context, not as
