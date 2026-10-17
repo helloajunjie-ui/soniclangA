@@ -22,6 +22,7 @@ func (s *Service) RegisterTools(reg *registry.Registry) {
 	reg.Register(listTool{svc: s})
 	reg.Register(saveTool{svc: s})
 	reg.Register(planTool{svc: s})
+	reg.Register(markTool{svc: s})
 }
 
 // ---- rea_list ----
@@ -256,8 +257,56 @@ func (t planTool) Execute(ctx context.Context, args map[string]interface{}) (str
 		}
 		out = append(out, call)
 	}
+	status := "未验证（首次执行后请用 rea_mark 记录结果）"
+	if a, err := t.svc.Get(app); err == nil {
+		if act, ok := a.Actions[action]; ok {
+			switch {
+			case act.Stale:
+				status = "已失效（上次回放失败，界面可能变了；重新录制这个 action 再保存）"
+			case act.Verified:
+				status = "已验证"
+			}
+			if act.LastNote != "" {
+				status += "；上次观察：" + act.LastNote
+			}
+		}
+	}
 	b, _ := json.MarshalIndent(out, "", "  ")
-	return string(b), nil
+	return fmt.Sprintf("状态：%s\n%s", status, string(b)), nil
 }
 
 var _ tool.Tool = listTool{}
+
+// ---- rea_mark ----
+
+type markTool struct{ svc *Service }
+
+func (markTool) Name() string { return "rea_mark" }
+func (markTool) Description() string {
+	return "记录一次回放的结果：成功则标为已验证，失败则标为失效并写清现象（如「窗口标题变了」）。下次 rea_plan 会据此提示重录，而不是让你照旧步骤硬试。"
+}
+func (markTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"app":    map[string]interface{}{"type": "string"},
+			"action": map[string]interface{}{"type": "string"},
+			"ok":     map[string]interface{}{"type": "boolean", "description": "这次回放成功了吗"},
+			"note":   map[string]interface{}{"type": "string", "description": "失败现象或成功补充"},
+		},
+		"required": []string{"app", "action", "ok"},
+	}
+}
+func (t markTool) Execute(_ context.Context, args map[string]interface{}) (string, error) {
+	app, _ := args["app"].(string)
+	action, _ := args["action"].(string)
+	ok, _ := args["ok"].(bool)
+	note, _ := args["note"].(string)
+	if err := t.svc.Mark(app, action, ok, note); err != nil {
+		return "", err
+	}
+	if ok {
+		return "已标记为验证通过：" + app + "/" + action, nil
+	}
+	return "已标记为失效：" + app + "/" + action + "。下次请重录该 action 并用 rea_save 更新。", nil
+}

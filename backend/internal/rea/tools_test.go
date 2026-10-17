@@ -142,3 +142,56 @@ func TestSaveTracksVersionAndArchivesRevisions(t *testing.T) {
 		t.Errorf("archived revision does not hold the old recording: %s", hist)
 	}
 }
+
+// Replay feedback is what keeps a recorded adapter honest: a failed replay must be
+// visible in the next plan instead of being silently retried forever.
+func TestMarkStaleShowsUpInPlan(t *testing.T) {
+	svc := New(t.TempDir())
+	ctx := context.Background()
+	if _, err := (saveTool{svc: svc}).Execute(ctx, map[string]interface{}{
+		"app": "comfy", "action": "queue",
+		"steps": []interface{}{map[string]interface{}{"op": "click", "target": "btn:queue"}},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// A fresh action is unverified; the plan says so.
+	out, err := (planTool{svc: svc}).Execute(ctx, map[string]interface{}{"app": "comfy", "action": "queue"})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !strings.Contains(out, "未验证") {
+		t.Errorf("unverified action not announced: %s", out)
+	}
+
+	if _, err := (markTool{svc: svc}).Execute(ctx, map[string]interface{}{
+		"app": "comfy", "action": "queue", "ok": false, "note": "按钮挪到了工具栏",
+	}); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	out, err = (planTool{svc: svc}).Execute(ctx, map[string]interface{}{"app": "comfy", "action": "queue"})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !strings.Contains(out, "已失效") || !strings.Contains(out, "按钮挪到了工具栏") {
+		t.Errorf("stale action not reported with its note: %s", out)
+	}
+
+	if _, err := (markTool{svc: svc}).Execute(ctx, map[string]interface{}{
+		"app": "comfy", "action": "queue", "ok": true,
+	}); err != nil {
+		t.Fatalf("mark ok: %v", err)
+	}
+	out, _ = (planTool{svc: svc}).Execute(ctx, map[string]interface{}{"app": "comfy", "action": "queue"})
+	if !strings.Contains(out, "已验证") {
+		t.Errorf("verified action not reported: %s", out)
+	}
+}
+
+// Marking an action that does not exist must fail, not create anything.
+func TestMarkUnknownActionFails(t *testing.T) {
+	svc := New(t.TempDir())
+	if err := svc.Mark("nope", "x", true, ""); err == nil {
+		t.Error("mark on a missing app returned nil")
+	}
+}

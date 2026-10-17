@@ -65,6 +65,16 @@ type Action struct {
 	Description string   `json:"description,omitempty"`
 	Params      []string `json:"params,omitempty"`
 	Steps       []Step   `json:"steps"`
+	// Verified means this action was confirmed to work at least once. An action
+	// that was never confirmed is a guess; rea_plan says so instead of letting the
+	// model treat a draft as a working adapter.
+	Verified bool `json:"verified,omitempty"`
+	// Stale marks an action whose replay failed — usually because the software
+	// updated and the controls moved. The next attempt should re-record it rather
+	// than retry the same steps.
+	Stale bool `json:"stale,omitempty"`
+	// LastNote carries the last observation ("窗口标题变了"), shown by rea_plan.
+	LastNote string `json:"lastNote,omitempty"`
 }
 
 // Service stores profiles under data/rea and resolves their parameters.
@@ -187,6 +197,33 @@ func (s *Service) Save(p *Profile) error {
 	s.cache[p.App] = cloneProfile(p)
 	s.mu.Unlock()
 	return nil
+}
+
+// Mark records the outcome of a replay: ok=true confirms the action, ok=false
+// marks it stale. This is the feedback that keeps recorded adapters honest —
+// without it a profile keeps looking valid long after the app changed.
+func (s *Service) Mark(app, action string, ok bool, note string) error {
+	s.mu.Lock()
+	p, exists := s.cache[app]
+	if !exists {
+		s.mu.Unlock()
+		return fmt.Errorf("没有 %q 的档案", app)
+	}
+	a, hasAction := p.Actions[action]
+	if !hasAction {
+		s.mu.Unlock()
+		return fmt.Errorf("%s 没有 action %q", app, action)
+	}
+	a.Verified = ok
+	a.Stale = !ok
+	a.LastNote = note
+	p.Actions[action] = a
+	cp := cloneProfile(p)
+	if ok {
+		cp.VerifiedAt = time.Now().UnixMilli()
+	}
+	s.mu.Unlock()
+	return s.Save(cp)
 }
 
 // Resolve substitutes ${var} placeholders and returns the concrete steps to run.

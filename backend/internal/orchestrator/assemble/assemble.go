@@ -221,6 +221,7 @@ const toolGuidanceText = `<tool_guidance>
 | rea_list | 已录制的软件接口 | 任务涉及没有 API/CLI 的桌面软件时先查 |
 | rea_save | 固化某软件的操作步骤 | 试通一次之后存档案 |
 | rea_plan | 取某 action 的步骤清单 | 复用已录档案，按清单调 control_* 或 http_fetch |
+| rea_mark | 记录回放结果 | 每次回放后必调：成功标已验证，失败标失效并写现象 |
 
 ## 硬规则
 
