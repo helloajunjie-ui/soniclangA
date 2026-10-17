@@ -29,9 +29,14 @@ type CatalogEntry struct {
 	// in the vault, never in the server record.
 	EnvDefaults map[string]string `json:"envDefaults,omitempty"`
 	SecretEnv   []string          `json:"secretEnv,omitempty"`
-	// Requires lists host tools the entry needs (node, uv) so the UI can say why
-	// an install would not run.
+	// Requires lists host tools the entry needs (node, uv, docker) so the UI can
+	// say why an install would not run.
 	Requires string `json:"requires,omitempty"`
+	// Verified records how the entry was checked against the real registry
+	// (package + version, or the upstream repo) and when. A catalog entry that
+	// nobody re-checked is how a package name goes stale and installs start
+	// failing with "process exited".
+	Verified string `json:"verified"`
 }
 
 // catalog is deliberately small and hand-checked: a list of everything on the
@@ -39,7 +44,8 @@ type CatalogEntry struct {
 // tool-oriented workflows actually reach for.
 var catalog = []CatalogEntry{
 	{
-		ID: "filesystem", Name: "文件系统",
+		ID:       "filesystem",
+		Verified: "npm @modelcontextprotocol/server-filesystem 1.0.0 · 2026-10-17", Name: "文件系统",
 		Description: "按目录读、写、搜索本机文件（只能访问你授权的目录）",
 		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
 		Command:     "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem", "${DIR}"},
@@ -47,7 +53,8 @@ var catalog = []CatalogEntry{
 		Requires:    "node",
 	},
 	{
-		ID: "git", Name: "Git",
+		ID:       "git",
+		Verified: "PyPI mcp-server-git 2026.10.10 · 2026-10-17", Name: "Git",
 		Description: "查看仓库状态、提交历史、diff，读取文件内容",
 		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
 		Command:     "uvx", Args: []string{"mcp-server-git", "--repository", "${DIR}"},
@@ -55,35 +62,40 @@ var catalog = []CatalogEntry{
 		Requires:    "uv",
 	},
 	{
-		ID: "fetch", Name: "网页抓取",
+		ID:       "fetch",
+		Verified: "PyPI mcp-server-fetch 2026.10.10 · 2026-10-17", Name: "网页抓取",
 		Description: "把网页转成 Markdown 给模型读（比原始 HTML 省 token）",
 		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
 		Command:     "uvx", Args: []string{"mcp-server-fetch"},
 		Requires: "uv",
 	},
 	{
-		ID: "memory", Name: "知识图谱记忆",
+		ID:       "memory",
+		Verified: "npm @modelcontextprotocol/server-memory 1.0.0 · 2026-10-17", Name: "知识图谱记忆",
 		Description: "以实体/关系形式维护跨会话的长期记忆",
 		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
 		Command:     "npx", Args: []string{"-y", "@modelcontextprotocol/server-memory"},
 		Requires: "node",
 	},
 	{
-		ID: "sequential-thinking", Name: "结构化思考",
+		ID:       "sequential-thinking",
+		Verified: "npm @modelcontextprotocol/server-sequential-thinking 1.0.0 · 2026-10-17", Name: "结构化思考",
 		Description: "把复杂问题拆成可回退的思考步骤",
 		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
 		Command:     "npx", Args: []string{"-y", "@modelcontextprotocol/server-sequential-thinking"},
 		Requires: "node",
 	},
 	{
-		ID: "time", Name: "时间与时区",
+		ID:       "time",
+		Verified: "PyPI mcp-server-time 2026.10.10 · 2026-10-17", Name: "时间与时区",
 		Description: "时区换算、当前时间、时间差计算",
 		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
 		Command:     "uvx", Args: []string{"mcp-server-time"},
 		Requires: "uv",
 	},
 	{
-		ID: "sqlite", Name: "SQLite",
+		ID:       "sqlite",
+		Verified: "PyPI mcp-server-sqlite 2025.4.25 · 2026-10-17", Name: "SQLite",
 		Description: "对指定数据库文件跑只读查询并返回结果",
 		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
 		Command:     "uvx", Args: []string{"mcp-server-sqlite", "--db-path", "${DB}"},
@@ -91,22 +103,31 @@ var catalog = []CatalogEntry{
 		Requires:    "uv",
 	},
 	{
+		// The npm package @modelcontextprotocol/server-github is deprecated ("no
+		// longer supported"): installing it yields a server that starts and then
+		// fails. The official replacement is the Go server published as a container
+		// image. `-e VAR` (no value) forwards the variable from this process's
+		// environment, so the token never appears in the command line.
 		ID: "github", Name: "GitHub",
-		Description: "读写仓库、issue、PR（需要个人访问令牌）",
-		Source:      "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
-		Command:     "npx", Args: []string{"-y", "@modelcontextprotocol/server-github"},
-		SecretEnv: []string{"GITHUB_PERSONAL_ACCESS_TOKEN"},
-		Requires:  "node",
+		Verified:    "github/github-mcp-server（官方；npm 旧包已废弃）· 2026-10-17",
+		Description: "读写仓库、issue、PR（需 Docker 与个人访问令牌）",
+		Source:      "https://github.com/github/github-mcp-server",
+		Command:     "docker",
+		Args:        []string{"run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"},
+		SecretEnv:   []string{"GITHUB_PERSONAL_ACCESS_TOKEN"},
+		Requires:    "docker",
 	},
 	{
-		ID: "playwright", Name: "浏览器自动化",
+		ID:       "playwright",
+		Verified: "npm @playwright/mcp 0.0.83 · 2026-10-17", Name: "浏览器自动化",
 		Description: "真实浏览器里点按、填表、截图、取无障碍树",
 		Source:      "https://github.com/microsoft/playwright-mcp",
 		Command:     "npx", Args: []string{"-y", "@playwright/mcp@latest"},
 		Requires: "node",
 	},
 	{
-		ID: "context7", Name: "库文档检索",
+		ID:       "context7",
+		Verified: "npm @upstash/context7-mcp 4.4.2 · 2026-10-17", Name: "库文档检索",
 		Description: "按库名取最新官方文档片段，减少凭记忆写 API",
 		Source:      "https://github.com/upstash/context7",
 		Command:     "npx", Args: []string{"-y", "@upstash/context7-mcp"},

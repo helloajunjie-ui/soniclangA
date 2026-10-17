@@ -38,6 +38,11 @@ func TestCatalogIsWellFormed(t *testing.T) {
 		if !strings.HasPrefix(e.Source, "https://github.com/") {
 			t.Errorf("%s: source %q is not a repository URL", e.ID, e.Source)
 		}
+		// And say what was checked: an unmaintained entry is how a package
+		// disappears and every install starts failing with "process exited".
+		if e.Verified == "" {
+			t.Errorf("%s: no verification note", e.ID)
+		}
 		// Placeholders must be resolvable: one that no EnvDefault covers would
 		// make install fail every time.
 		for _, a := range e.Args {
