@@ -1,45 +1,219 @@
-// Package rea implements the REA auxiliary toolset (DESIGN §M9): a
-// Retrieve/Extend/Act (or Reasoning/Execution/Assessment) loop that augments
-// the main orchestrator with external grounding and self-critique. M2 ships the
-// service, the enable flag and safe no-op seams; the retrieval grounding,
-// action extension and self-assessment workers are wired in a later milestone.
+// Package rea builds the "port" for software that has none: a recorded,
+// parameterised action list that turns a GUI-only app into something the model
+// can call again without rediscovering its controls every time.
+//
+// The division of labour is deliberate. REA does not click anything itself — the
+// control_* tools already do that, under the module switch, the allow list and the
+// audit log. REA only remembers *what to do*: which window, which action, which
+// steps, which parts are parameters. Execution stays with the tools that already
+// have the safeguards.
 package rea
 
 import (
-	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 )
 
-// errDisabled is returned when REA is not enabled.
-var errDisabled = errors.New("REA auxiliary tools are disabled")
+// Step is one recorded operation. Ops map onto the control_* tools:
+//
+//	focus  -> control_focus        (target: window)
+//	click  -> control_click        (target: control id or x,y)
+//	type   -> control_type_text    (text, may contain ${var})
+//	hotkey -> control_hotkey       (keys, e.g. "ctrl+s")
+//	launch -> control_launch       (target: executable)
+//	http   -> http_fetch           (url, may contain ${var}) — for apps that do
+//	                                  expose a local port; probing first is the
+//	                                  whole point, so this op exists.
+type Step struct {
+	Op     string `json:"op"`
+	Target string `json:"target,omitempty"`
+	Text   string `json:"text,omitempty"`
+	Keys   string `json:"keys,omitempty"`
+	URL    string `json:"url,omitempty"`
+	// Note is shown to the model when it plans a replay: it is the place to say
+	// "queue 按钮在右上角" without hard-coding coordinates in the step.
+	Note string `json:"note,omitempty"`
+}
 
-// Service is the REA backend.
+// Profile is the adapter for one application.
+type Profile struct {
+	App        string `json:"app"` // stable id, e.g. "comfy-desktop"
+	Name       string `json:"name,omitempty"`
+	MatchClass string `json:"matchClass,omitempty"` // window class / process name
+	MatchTitle string `json:"matchTitle,omitempty"` // window title substring
+	// Probe records what recon found, so the next session does not repeat it:
+	// "port 8188" beats "no API" for deciding whether to drive the GUI at all.
+	Probe     []string          `json:"probe,omitempty"`
+	Actions   map[string]Action `json:"actions"`
+	UpdatedAt int64             `json:"updatedAt"`
+}
+
+// Action is one parameterised operation, e.g. "txt2img" with a ${prompt} step.
+type Action struct {
+	Description string   `json:"description,omitempty"`
+	Params      []string `json:"params,omitempty"`
+	Steps       []Step   `json:"steps"`
+}
+
+// Service stores profiles under data/rea and resolves their parameters.
 type Service struct {
-	Enabled bool
+	dir   string
+	mu    sync.RWMutex
+	cache map[string]*Profile
 }
 
-// New constructs the REA Service.
-func New(enabled bool) *Service {
-	return &Service{Enabled: enabled}
-}
-
-// IsEnabled reports whether REA is active.
-func (s *Service) IsEnabled() bool { return s.Enabled }
-
-// Suggest returns an auxiliary reasoning suggestion for a prompt. M2 returns a
-// placeholder when disabled, and a not-implemented note when enabled.
-func (s *Service) Suggest(_ string) (string, error) {
-	if !s.Enabled {
-		return "", errDisabled
+// New loads the profiles already on disk.
+func New(dir string) *Service {
+	s := &Service{dir: dir, cache: map[string]*Profile{}}
+	_ = os.MkdirAll(dir, 0o755)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return s
 	}
-	return "", errors.New("REA suggest is not implemented in M2")
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var p Profile
+		if json.Unmarshal(b, &p) == nil && p.App != "" {
+			s.cache[p.App] = &p
+		}
+	}
+	return s
 }
 
-// Act performs an auxiliary action (extend/assess). M2 is a no-op seam.
-func (s *Service) Act(_ context.Context, action string, _ map[string]interface{}) (string, error) {
-	if !s.Enabled {
-		return "", errDisabled
+// List returns the known profiles, sorted by app id.
+func (s *Service) List() []Profile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Profile, 0, len(s.cache))
+	for _, p := range s.cache {
+		out = append(out, *p)
 	}
-	return "", fmt.Errorf("REA action %s is not implemented in M2", action)
+	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
+	return out
+}
+
+// Get returns one profile.
+func (s *Service) Get(app string) (*Profile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.cache[app]
+	if !ok {
+		return nil, fmt.Errorf("没有 %q 的 REA 档案；先用 rea_save 录一份", app)
+	}
+	cp := *p
+	return &cp, nil
+}
+
+// Save stores a profile. App must be a plain id: it becomes a file name.
+func (s *Service) Save(p *Profile) error {
+	if !validApp(p.App) {
+		return fmt.Errorf("app 只能是字母、数字、- 和 _：%q", p.App)
+	}
+	if len(p.Actions) == 0 {
+		return fmt.Errorf("至少要有 1 个 action")
+	}
+	for name, a := range p.Actions {
+		if len(a.Steps) == 0 {
+			return fmt.Errorf("action %q 没有步骤", name)
+		}
+		for i, st := range a.Steps {
+			if !validOp(st.Op) {
+				return fmt.Errorf("action %q 第 %d 步的 op %q 不支持（可用：focus/click/type/hotkey/launch/http）", name, i+1, st.Op)
+			}
+		}
+	}
+	p.UpdatedAt = time.Now().UnixMilli()
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(s.dir, p.App+".json.tmp")
+	final := filepath.Join(s.dir, p.App+".json")
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	cp := *p
+	s.cache[p.App] = &cp
+	s.mu.Unlock()
+	return nil
+}
+
+// Resolve substitutes ${var} placeholders and returns the concrete steps to run.
+//
+// Missing parameters are an error rather than an empty string: a click with an
+// empty text box looks like it worked and produces the wrong result.
+func (s *Service) Resolve(app, action string, vars map[string]string) ([]Step, error) {
+	p, err := s.Get(app)
+	if err != nil {
+		return nil, err
+	}
+	a, ok := p.Actions[action]
+	if !ok {
+		names := make([]string, 0, len(p.Actions))
+		for n := range p.Actions {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("%s 没有 action %q（可用：%s）", app, action, strings.Join(names, ", "))
+	}
+	out := make([]Step, 0, len(a.Steps))
+	for _, st := range a.Steps {
+		st.Target = subst(st.Target, vars)
+		st.Text = subst(st.Text, vars)
+		st.Keys = subst(st.Keys, vars)
+		st.URL = subst(st.URL, vars)
+		if strings.Contains(st.Target+st.Text+st.Keys+st.URL, "${") {
+			return nil, fmt.Errorf("参数没给全：步骤还残留占位符（%s）", strings.Join(a.Params, ", "))
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+func subst(s string, vars map[string]string) string {
+	if s == "" || !strings.Contains(s, "${") {
+		return s
+	}
+	for k, v := range vars {
+		s = strings.ReplaceAll(s, "${"+k+"}", v)
+	}
+	return s
+}
+
+func validApp(app string) bool {
+	if app == "" || len(app) > 48 {
+		return false
+	}
+	for _, c := range app {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validOp(op string) bool {
+	switch op {
+	case "focus", "click", "type", "hotkey", "launch", "http":
+		return true
+	}
+	return false
 }
