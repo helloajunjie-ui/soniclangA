@@ -20,6 +20,7 @@ import (
 
 	"github.com/agenthub/agent-proxy/internal/audit"
 	"github.com/agenthub/agent-proxy/internal/tool"
+	"github.com/agenthub/agent-proxy/internal/workspace"
 )
 
 // ---- get_time ----
@@ -604,6 +605,11 @@ func (t shellExecTool) Execute(ctx context.Context, args map[string]interface{})
 	defer cancel()
 	// Use PowerShell on Windows.
 	cmd := exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command", cmdStr)
+	// Run inside the task workspace when one was resolved, so Get-ChildItem . and
+	// every relative path mean the directory the other tools write to.
+	if dir := workspace.FromContext(ctx); dir != "" {
+		cmd.Dir = dir
+	}
 	out, err := cmd.CombinedOutput()
 	if cmdCtx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("命令超时（%d 秒），已终止。已输出:\n%s", timeout, string(out)), nil

@@ -160,20 +160,23 @@ type Usage struct {
 
 // Conversation is the session metadata entity (DESIGN §7 meta.json).
 type Conversation struct {
-	ID                string     `json:"id"`
-	RoleId            string     `json:"roleId"`
-	Title             string     `json:"title"`
-	Pinned            bool       `json:"pinned"`
-	Mode              Mode       `json:"mode"`
-	Permission        string     `json:"permission"` // ask|auto|full
-	DefaultProviderId string     `json:"defaultProviderId,omitempty"`
-	TaskStatus        TaskStatus `json:"taskStatus,omitempty"`
-	MaxSteps          int        `json:"maxSteps"`
-	Budget            Budget     `json:"budget,omitempty"`
-	ActualProviderId  string     `json:"actualProviderId,omitempty"`
-	ActualModel       string     `json:"actualModel,omitempty"`
-	TaskPlan          *TaskPlan  `json:"taskPlan,omitempty"`
-	Usage             Usage      `json:"usage"`
+	ID                string `json:"id"`
+	RoleId            string `json:"roleId"`
+	Title             string `json:"title"`
+	Pinned            bool   `json:"pinned"`
+	Mode              Mode   `json:"mode"`
+	Permission        string `json:"permission"` // ask|auto|full
+	DefaultProviderId string `json:"defaultProviderId,omitempty"`
+	// WorkspaceDir is the directory the user chose for this task artifacts.
+	// Empty means: the product creates one per conversation under the data dir.
+	WorkspaceDir     string     `json:"workspaceDir,omitempty"`
+	TaskStatus       TaskStatus `json:"taskStatus,omitempty"`
+	MaxSteps         int        `json:"maxSteps"`
+	Budget           Budget     `json:"budget,omitempty"`
+	ActualProviderId string     `json:"actualProviderId,omitempty"`
+	ActualModel      string     `json:"actualModel,omitempty"`
+	TaskPlan         *TaskPlan  `json:"taskPlan,omitempty"`
+	Usage            Usage      `json:"usage"`
 	// Vars holds the values for the role's {{template}} variables (M4). Stored
 	// per conversation so two sessions using the same role can fill them in
 	// differently.

@@ -32,6 +32,7 @@ import (
 	"github.com/agenthub/agent-proxy/internal/skill"
 	"github.com/agenthub/agent-proxy/internal/tool/registry"
 	"github.com/agenthub/agent-proxy/internal/util"
+	"github.com/agenthub/agent-proxy/internal/workspace"
 )
 
 // MemoryService is the optional recall backend (nil before M3b).
@@ -257,6 +258,15 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 	var conv *conversation.Conversation
 	if in.ConversationID != "" {
 		c, cerr := o.Conversations.Get(in.ConversationID)
+
+		// Local work needs one agreed place for its artifacts: the tools that write
+		// files and the shell working directory must not each guess. The user choice
+		// wins; otherwise each task gets its own directory under the data dir.
+		if ws, wsErr := workspace.Resolve(o.Config.DataDir, in.ConversationID, helperWorkspaceDir(c)); wsErr != nil {
+			logx.Warnf("工作空间未就绪：%v", wsErr)
+		} else {
+			ctx = workspace.WithWorkspace(ctx, ws)
+		}
 		if cerr != nil {
 			emit("error", map[string]interface{}{"code": "conv_not_found", "message": cerr.Error()})
 			return
@@ -1053,4 +1063,12 @@ func firstUsableModel(p *provider.Provider) string {
 		return m.ID
 	}
 	return ""
+}
+
+// helperWorkspaceDir returns the directory the user chose for this task, if any.
+func helperWorkspaceDir(c *conversation.Conversation) string {
+	if c == nil {
+		return ""
+	}
+	return c.WorkspaceDir
 }
