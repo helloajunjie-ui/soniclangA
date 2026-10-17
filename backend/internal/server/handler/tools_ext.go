@@ -141,6 +141,36 @@ func (h *Handler) mcpServers(w http.ResponseWriter, r *http.Request, p string) {
 		return
 	}
 	switch {
+	case p == "/api/v1/mcp/catalog" || p == "/api/v1/mcp/catalog/":
+		// The known-good list. Each entry is a git/npm/pypi source that npx/uvx
+		// fetches on first run, so "install" is just recording the launch line.
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.json(w, 200, h.MCP.Catalog())
+	case strings.HasPrefix(p, "/api/v1/mcp/catalog/"):
+		// POST /api/v1/mcp/catalog/{id}/install {"env": {...}}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		rest := strings.Trim(strings.TrimPrefix(p, "/api/v1/mcp/catalog/"), "/")
+		id := strings.TrimSuffix(rest, "/install")
+		if id == "" || id == rest && !strings.HasSuffix(rest, "/install") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Env map[string]string `json:"env"`
+		}
+		_, _ = h.decodeOptional(r, &body)
+		info, err := h.MCP.InstallFromCatalog(r.Context(), id, body.Env)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.json(w, 201, info)
 	case p == "/api/v1/mcp/servers" || p == "/api/v1/mcp/servers/":
 		switch r.Method {
 		case http.MethodGet:
