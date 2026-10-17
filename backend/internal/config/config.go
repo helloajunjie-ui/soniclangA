@@ -6,8 +6,11 @@ package config
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/agenthub/agent-proxy/internal/storage"
@@ -122,7 +125,68 @@ func Parse() (*Config, error) {
 	if v := os.Getenv("AGENTHUB_TOKEN"); v != "" {
 		c.Token = v
 	}
+	if err := c.checkExposure(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// checkExposure refuses a listen address that is reachable from the network
+// while no auth token is set.
+//
+// The API is not read-only: it can list conversation history, rewrite provider
+// credentials through the vault, toggle the desktop-control module and then
+// press keys on the machine. The Origin check in the handler stops a web page
+// from doing any of that, but it stops nothing else — curl from the LAN is
+// allowed through by design (no Origin header).
+//
+// So "bind loopback" is the only thing protecting a token-less install, and a
+// single --addr change used to be enough to expose the whole machine. Refusing
+// to start is better than starting in a state the operator did not intend.
+func (c *Config) checkExposure() error {
+	if c.Token != "" || isLoopbackAddr(c.Addr) {
+		return nil
+	}
+	return fmt.Errorf("监听地址 %q 不是回环地址，但没有设置 --token（或 AGENTHUB_TOKEN）。"+
+		"该 API 可以读取会话与密钥、并操作桌面，暴露到网络上等于把本机交出去；"+
+		"请改用 127.0.0.1:%s，或设置一个 token", c.Addr, portOf(c.Addr))
+}
+
+// isLoopbackAddr reports whether addr can only be reached from this machine.
+//
+// Anything that cannot be proven local is treated as exposed: a hostname that
+// does not resolve to a loopback IP, a bare ":8787" (all interfaces) and an
+// unparsable address all count as public. Guessing in the permissive direction
+// here would silently undo the check.
+func isLoopbackAddr(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	} else if strings.Count(addr, ":") == 1 {
+		// "host:port" where the port is not numeric still parses as host:port
+		// above; a lone "host:" means all interfaces on that host.
+		host = strings.TrimSuffix(addr, ":")
+	}
+	host = strings.Trim(host, "[]")
+	switch host {
+	case "", "0.0.0.0", "::", "*":
+		return false
+	case "localhost":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// portOf returns just the port part of addr, for the suggestion in the error
+// message ("改用 127.0.0.1:8787"). Falls back to the default port.
+func portOf(addr string) string {
+	if _, port, err := net.SplitHostPort(addr); err == nil && port != "" {
+		return port
+	}
+	return "8787"
 }
 
 // Init creates the data directory and loads the settings document. Settings are

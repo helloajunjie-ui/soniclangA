@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The routing strategy reaches the UI as a dropdown option value, so an
 // unrecognised value cannot just be ignored: the picker renders it as blank and
@@ -132,5 +135,43 @@ func TestMergeSettingsKeepsPartialFields(t *testing.T) {
 	}
 	if got.Failover.CooldownSeconds != Defaults().Failover.CooldownSeconds {
 		t.Fatalf("cooldown fell to zero: %d", got.Failover.CooldownSeconds)
+	}
+}
+
+// The API can read conversation history, rewrite provider credentials and drive
+// the desktop, so binding it to a routable address without a token hands the
+// machine to anyone on the network. The Origin check does not help here: it only
+// constrains browsers, and a token-less install used to be one --addr away.
+func TestNonLoopbackAddrRequiresToken(t *testing.T) {
+	cases := []struct {
+		name    string
+		addr    string
+		token   string
+		wantErr bool
+	}{
+		{"default loopback", "127.0.0.1:8787", "", false},
+		{"loopback ipv6", "[::1]:8787", "", false},
+		{"localhost name", "localhost:8787", "", false},
+		{"loopback with token", "127.0.0.1:8787", "s3cret", false},
+		{"all interfaces (bare port)", ":8787", "", true},
+		{"all interfaces (0.0.0.0)", "0.0.0.0:8787", "", true},
+		{"lan address", "192.168.1.9:8787", "", true},
+		{"lan address with token", "192.168.1.9:8787", "s3cret", false},
+		{"public hostname", "hub.example.com:8787", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &Config{Addr: c.addr, Token: c.token}
+			err := cfg.checkExposure()
+			if c.wantErr && err == nil {
+				t.Fatalf("addr %q without token was accepted; it must be refused", c.addr)
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("addr %q was refused: %v", c.addr, err)
+			}
+			if err != nil && !strings.Contains(err.Error(), "127.0.0.1:8787") {
+				t.Errorf("error should suggest a loopback address to use, got: %v", err)
+			}
+		})
 	}
 }
