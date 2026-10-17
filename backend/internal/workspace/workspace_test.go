@@ -90,3 +90,32 @@ func TestContextRoundTrip(t *testing.T) {
 		t.Errorf("nil context returned %q", got)
 	}
 }
+
+func TestSubdirPerArtifactKind(t *testing.T) {
+	ws := t.TempDir()
+	for _, kind := range []string{KindImages, KindScripts, KindDocs, KindDownloads, KindLogs} {
+		dir, err := Subdir(ws, kind)
+		if err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if dir != filepath.Join(ws, kind) {
+			t.Errorf("%s -> %q", kind, dir)
+		}
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			t.Errorf("%s was not created", kind)
+		}
+	}
+}
+
+// A typo'd kind must not quietly create a new folder.
+func TestSubdirRejectsUnknownKind(t *testing.T) {
+	ws := t.TempDir()
+	for _, bad := range []string{"", "imagez", "../escape", "Images"} {
+		if _, err := Subdir(ws, bad); err == nil {
+			t.Errorf("kind %q was accepted", bad)
+		}
+	}
+	if _, err := Subdir("", KindImages); err == nil {
+		t.Error("an empty workspace was accepted")
+	}
+}

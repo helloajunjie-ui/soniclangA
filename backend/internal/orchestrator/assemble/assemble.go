@@ -229,6 +229,7 @@ const toolGuidanceText = `<tool_guidance>
 - web_fetch / http_fetch 返回 403 或超时：不要重复抓同一个 URL，改用 web_search。
 - shell_exec 用 ; 或 | 合并多条命令，不要连着发多次。
 - 流程、结构或多步依赖适合用 mermaid 图；一两句话说清的不画。
+- 产出物按类型放进工作空间的子目录：images/（图）、scripts/（脚本）、docs/（文档）、downloads/（下载）、logs/（日志）。根目录只放最终交付物，别把中间文件堆在根上。
 - 桌面软件没有 API/CLI 时：先探本机端口与脚本入口，再 rea_list 查档案；都没有才现场 control_inspect，试通后用 rea_save 固化，之后每次 rea_plan 复用。模拟点击是最后手段，不是首选。
 </tool_guidance>`
 

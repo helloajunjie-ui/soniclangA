@@ -87,3 +87,36 @@ func safeName(id string) string {
 	}
 	return s
 }
+
+// Artifact kinds. One directory per kind inside the workspace, so a task folder
+// stays readable: images beside scripts beside downloads is how "where did that
+// file go" starts.
+const (
+	KindImages    = "images"
+	KindScripts   = "scripts"
+	KindDocs      = "docs"
+	KindDownloads = "downloads"
+	KindLogs      = "logs"
+)
+
+var kinds = map[string]bool{
+	KindImages: true, KindScripts: true, KindDocs: true,
+	KindDownloads: true, KindLogs: true,
+}
+
+// Subdir returns (and creates) the directory for one artifact kind inside the
+// workspace. An unknown kind is an error rather than an arbitrary new folder:
+// a typo'd kind would silently scatter files across directories nobody looks in.
+func Subdir(ws, kind string) (string, error) {
+	if ws == "" {
+		return "", fmt.Errorf("还没有工作空间")
+	}
+	if !kinds[kind] {
+		return "", fmt.Errorf("未知的产出物类型 %q（可用：images/scripts/docs/downloads/logs）", kind)
+	}
+	dir := filepath.Join(ws, kind)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
