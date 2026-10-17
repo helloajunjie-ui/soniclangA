@@ -103,7 +103,7 @@ npm run build:only   # 跳过类型检查，只求快（不要用它出包）
 顺手跑测试用 `.\build.ps1 -Test`。
 
 ```bash
-cd backend && go test ./...   # 27 个包有测试，295 个测试函数
+cd backend && go test ./...   # 29 个包有测试，315 个测试函数
 ```
 
 > `build.ps1` 会把 `TEMP`/`TMP` 指到仓库内的 `.tmp`：这台机器上子进程写系统
