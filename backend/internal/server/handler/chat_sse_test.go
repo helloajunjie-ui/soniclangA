@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,8 +18,10 @@ import (
 	"github.com/agenthub/agent-proxy/internal/conversation"
 	"github.com/agenthub/agent-proxy/internal/keyvault"
 	"github.com/agenthub/agent-proxy/internal/logx"
+	"github.com/agenthub/agent-proxy/internal/memory"
 	"github.com/agenthub/agent-proxy/internal/orchestrator"
 	"github.com/agenthub/agent-proxy/internal/provider"
+	"github.com/agenthub/agent-proxy/internal/retrieval"
 	"github.com/agenthub/agent-proxy/internal/role"
 	"github.com/agenthub/agent-proxy/internal/storage"
 	"github.com/agenthub/agent-proxy/internal/tool/registry"
@@ -36,15 +39,37 @@ import (
 // upstreamAnswer is what the fake vendor streams back.
 const upstreamAnswer = "你好，我是 mock。"
 
+// fakeUpstream is an OpenAI-compatible vendor that records the request body, so a
+// test can assert what the model was actually told (the system prompt).
+type fakeUpstream struct {
+	*httptest.Server
+	mu   sync.Mutex
+	last []byte
+}
+
+// LastRequest returns the most recent request body in the form
+// `{"model":...,"messages":[...]}`, decoded back to a very large string.
+func (f *fakeUpstream) LastRequest() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.last...)
+}
+
 // newFakeUpstream serves POST /v1/chat/completions as an OpenAI-compatible
 // stream, splitting the answer into a few chunks so the delta path is real.
 // A non-zero status makes it answer with an error instead.
-func newFakeUpstream(t *testing.T, status int) *httptest.Server {
+func newFakeUpstream(t *testing.T, status int) *fakeUpstream {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := &fakeUpstream{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
 			return
+		}
+		if body, err := io.ReadAll(r.Body); err == nil {
+			f.mu.Lock()
+			f.last = body
+			f.mu.Unlock()
 		}
 		if status != http.StatusOK {
 			w.WriteHeader(status)
@@ -88,20 +113,23 @@ func newFakeUpstream(t *testing.T, status int) *httptest.Server {
 			flusher.Flush()
 		}
 	}))
-	t.Cleanup(srv.Close)
-	return srv
+	t.Cleanup(f.Close)
+	return f
 }
 
 type chatApp struct {
 	cfg   *config.Config
 	convs *conversation.Service
+	mem   *memory.Service
 	h     *Handler
 	srv   *httptest.Server
 }
 
-// newChatApp wires the minimum real services for a chat turn. Optional
-// collaborators (memory, knowledge, skills, methodologies) are left nil on
-// purpose — the orchestrator guards every one of them.
+// newChatApp wires the minimum real services for a chat turn. Knowledge, skills
+// and methodologies are left nil on purpose — the orchestrator guards every one
+// of them. Memory is real because the recall path is part of what these tests
+// pin down (a recall that never reaches the prompt is the bug, and a nil service
+// would pass such a test by accident).
 func newChatApp(t *testing.T, upstreamURL string) *chatApp {
 	t.Helper()
 	dir := t.TempDir()
@@ -154,14 +182,16 @@ func newChatApp(t *testing.T, upstreamURL string) *chatApp {
 
 	convs := conversation.New(open("conversations"))
 	orch := orchestrator.New(providers, convs, roles, registry.New(), cfg, audit.New(dir))
+	mem := memory.New(open("mem"), open("memidx"), filepath.Join(dir, "memory"), retrieval.New(), nil, false)
+	orch.Memory = mem
 
 	h := &Handler{
-		Cfg: cfg, Providers: providers, Roles: roles, Convs: convs,
+		Cfg: cfg, Providers: providers, Roles: roles, Convs: convs, Memory: mem,
 		Tools: registry.New(), Orch: orch, log: logx.Default(),
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &chatApp{cfg: cfg, convs: convs, h: h, srv: srv}
+	return &chatApp{cfg: cfg, convs: convs, mem: mem, h: h, srv: srv}
 }
 
 type sseFrame struct {
@@ -394,5 +424,49 @@ func TestChatSSEReachesTheWriterThroughTheLogWrapper(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "data:") {
 		t.Fatalf("no frames written through the wrapper: %q", string(b))
+	}
+}
+
+// The recalled memories have to reach the model, not just the context panel.
+// buildMessages used to take only the knowledge citations, so the memory recall
+// ran *after* the prompt was built and its result was used only to fill the
+// `context` SSE event: the UI showed "记忆 N 条" while the system prompt
+// contained nothing of the sort, and the model answered as if it had no memory.
+func TestChatSSEInjectsRecalledMemoryIntoThePrompt(t *testing.T) {
+	upstream := newFakeUpstream(t, http.StatusOK)
+	app := newChatApp(t, upstream.URL)
+
+	if _, err := app.mem.Add(&memory.Memory{
+		Level:   memory.LevelL1,
+		Content: "用户偏好简洁的回答，不要客套与铺垫。",
+	}); err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+
+	convID := app.newConversation(t)
+	_, _, frames := app.chat(t, convID, "我偏好什么样的回答？")
+
+	// The UI's context panel describes the same thing the model received.
+	var sawMemoryInEvent bool
+	for _, f := range frames {
+		if f.Type != "context" {
+			continue
+		}
+		if arr, ok := f.Data["memory"].([]interface{}); ok && len(arr) > 0 {
+			sawMemoryInEvent = true
+		}
+	}
+	if !sawMemoryInEvent {
+		t.Error("the context event reported no recalled memory")
+	}
+
+	sent := string(upstream.LastRequest())
+	if !strings.Contains(sent, "不要客套") {
+		t.Fatalf("the recalled memory never reached the model prompt.\nrequest: %s", sent)
+	}
+	// It must arrive as background, not as an instruction.
+	// The body is JSON and encoding/json escapes angle brackets, hence both forms.
+	if !strings.Contains(sent, "<memory_guidance>") && !strings.Contains(sent, "\\u003cmemory_guidance\\u003e") {
+		t.Error("memory facts were injected outside the memory_guidance boundary")
 	}
 }

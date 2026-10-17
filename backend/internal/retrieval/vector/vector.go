@@ -10,6 +10,12 @@ type Scored struct {
 }
 
 // Search returns the topK documents by cosine similarity to the query.
+//
+// A zero similarity is not a weak match, it means "no match at all" (empty or
+// zero vector, dimension mismatch, or genuinely orthogonal text). Those must not
+// be emitted: RRF ranks candidates by position, not by score, so a 0-scored row
+// would still be promoted into the fused result and shown as a citation or a
+// recalled memory that nothing actually matched.
 func Search(query []float32, ids []string, embs map[string][]float32, topK int) []Scored {
 	scores := map[string]float64{}
 	for _, id := range ids {
@@ -17,7 +23,9 @@ func Search(query []float32, ids []string, embs map[string][]float32, topK int) 
 		if !ok {
 			continue
 		}
-		scores[id] = cosine(query, e)
+		if sc := cosine(query, e); sc > 0 {
+			scores[id] = sc
+		}
 	}
 	out := make([]Scored, 0, len(scores))
 	for id, sc := range scores {

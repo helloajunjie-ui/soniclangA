@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/agenthub/agent-proxy/internal/audit"
 	"github.com/agenthub/agent-proxy/internal/conversation"
@@ -396,6 +397,15 @@ func (s *Service) Update(m *Memory) error {
 	if m.ID == "" {
 		return fmt.Errorf("memory id required")
 	}
+	// The previous copy decides whether the retrieval row needs rewriting. A
+	// flag-only update used to re-register the row with a nil embedding, which
+	// clears the stored vector (Refresh replaces, it does not merge) — so
+	// toggling a memory's importance silently dropped it out of semantic recall
+	// until something embedded it again.
+	s.mu.RLock()
+	prev, existed := s.cache[m.ID]
+	s.mu.RUnlock()
+
 	m.UpdatedAt = time.Now().UnixMilli()
 	if err := s.entities.Save(m.ID, m); err != nil {
 		return err
@@ -404,7 +414,13 @@ func (s *Service) Update(m *Memory) error {
 	s.cache[m.ID] = *m
 	s.mu.Unlock()
 	if s.retrieval != nil {
-		_ = s.retrieval.Refresh(nsOfScope(scopeKey(m.Scope)), m.ID, m.Content, nil)
+		// A changed text does invalidate the old vector, so re-registering (and
+		// dropping the stale vector) is correct there.
+		textChanged := !existed || prev.Content != m.Content
+		scopeChanged := existed && scopeKey(prev.Scope) != scopeKey(m.Scope)
+		if textChanged || scopeChanged {
+			_ = s.retrieval.Refresh(nsOfScope(scopeKey(m.Scope)), m.ID, m.Content, nil)
+		}
 	}
 	return nil
 }
@@ -652,13 +668,23 @@ func (s *Service) Embed(ids []string, providerID, model string) error {
 		s.SetEmbedding(providerID, model, dim)
 	}
 	for sk, recs := range byScope {
-		// merge with pre-existing records of the same scope
-		var prev persistedIndex
+		// Merge with pre-existing records of the same scope, but drop the ones
+		// whose memory no longer exists, was invalidated, or moved to another
+		// scope. Without this the vector file only ever grew: deleted entries keep
+		// occupying recall candidate slots (Recall then throws the hit away on the
+		// cache lookup), and after enough deletions live memories stop being
+		// returned at all.
 		kept := map[string]retrieval.Record{}
+		var prev persistedIndex
 		if err := s.indexes.Load(sk, &prev); err == nil {
+			now := time.Now().UnixMilli()
+			s.mu.RLock()
 			for _, r := range prev.Records {
-				kept[r.ID] = r
+				if m, ok := s.cache[r.ID]; ok && m.recallable(now) && scopeKey(m.Scope) == sk {
+					kept[r.ID] = r
+				}
 			}
+			s.mu.RUnlock()
 		}
 		for _, r := range recs {
 			kept[r.ID] = r
@@ -849,6 +875,13 @@ func (s *Service) Guidance(maxChars int) string {
 func truncate(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
+	}
+	// Cut on a rune boundary. Slicing bytes in the middle of a multi-byte rune
+	// puts invalid UTF-8 into the system prompt — the same defect as the
+	// desktop-control Truncate that produced half a Chinese character
+	// (DESIGN §16 缺陷表), in a new place.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

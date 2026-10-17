@@ -337,18 +337,29 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 		cites = o.Knowledge.SearchCollections(role.KnowledgeCollectionIds, in.Message, topK)
 	}
 
-	// build initial messages (knowledge is injected into the system prompt).
-	// The current user message is already persisted (see AppendMessage above),
-	// so buildMessages already includes it in history — do not append it again,
-	// or the model sees the same user turn twice. A continue turn appends an
-	// invisible "keep writing" instruction as the model input tail; it is not
+	// memory recall (query-driven): the specific facts this message needs. It has
+	// to run *before* the prompt is built because the model must actually receive
+	// them — the old order recalled only to fill the `context` event, so the UI
+	// showed "记忆 N 条" while the prompt contained nothing of the sort.
+	var recalled []memory.MemoryResult
+	if o.Memory != nil && o.moduleEnabled("memory.engine") && !continueMode {
+		recalled = o.Memory.Retrieve(ctx, in.Message, role.RetrievalTopK)
+	}
+
+	// build initial messages (knowledge and recalled memory go into the system
+	// prompt). The current user message is already persisted (see AppendMessage
+	// above), so buildMessages already includes it in history — do not append it
+	// again, or the model sees the same user turn twice. A continue turn appends
+	// an invisible "keep writing" instruction as the model input tail; it is not
 	// persisted as a user message.
-	msgs := o.buildMessages(conv, role, cites, in.Message)
+	msgs := o.buildMessages(conv, role, cites, in.Message, recalled)
 	if continueMode {
 		msgs = append(msgs, provider.Message{Role: "user", Content: "（请继续刚才的回答，从上一句接着往下写，不要重复）"})
 	}
 
-	// context event: injected knowledge + recalled memory (DESIGN §15.1)
+	// context event: injected knowledge + recalled memory (DESIGN §15.1). Built
+	// from the same slices the prompt got, so the panel cannot claim to have
+	// injected something the model never saw.
 	{
 		kn := make([]map[string]interface{}, 0, len(cites))
 		for _, c := range cites {
@@ -357,11 +368,9 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 				"chunk": c.Chunk, "text": c.Text, "score": c.Score, "trust": c.Trust,
 			})
 		}
-		mem := []map[string]interface{}{}
-		if o.Memory != nil && o.moduleEnabled("memory.engine") {
-			for _, r := range o.Memory.Retrieve(ctx, in.Message, role.RetrievalTopK) {
-				mem = append(mem, map[string]interface{}{"id": r.ID, "level": r.Level, "content": r.Content, "score": r.Score})
-			}
+		mem := make([]map[string]interface{}, 0, len(recalled))
+		for _, r := range recalled {
+			mem = append(mem, map[string]interface{}{"id": r.ID, "level": r.Level, "content": r.Content, "score": r.Score})
 		}
 		if len(kn) > 0 || len(mem) > 0 {
 			emit("context", map[string]interface{}{"knowledge": kn, "memory": mem})
@@ -646,16 +655,23 @@ func (o *Orchestrator) BuildMessages(convID string, query string) ([]provider.Me
 	if o.Knowledge != nil {
 		cites = o.Knowledge.SearchCollections(rl.KnowledgeCollectionIds, query, rl.RetrievalTopK)
 	}
-	return o.buildMessages(conv, rl, cites, query), nil
+	var recalled []memory.MemoryResult
+	if o.Memory != nil && o.moduleEnabled("memory.engine") {
+		recalled = o.Memory.Retrieve(context.Background(), query, rl.RetrievalTopK)
+	}
+	return o.buildMessages(conv, rl, cites, query, recalled), nil
 }
 
-func (o *Orchestrator) buildMessages(conv *conversation.Conversation, role *role.Role, cites []knowledge.Citation, query string) []provider.Message {
+func (o *Orchestrator) buildMessages(conv *conversation.Conversation, role *role.Role, cites []knowledge.Citation, query string, recalled []memory.MemoryResult) []provider.Message {
 	var msgs []provider.Message
 	var guidance string
-	// L3 persona + L2 scenes steer every turn; the query-driven recall below
-	// only adds the specific facts this message actually needs.
+	// L3 persona + L2 scenes steer every turn, and the query-driven recall adds
+	// the specific facts this message needs.
 	if o.Memory != nil && o.moduleEnabled("memory.engine") {
 		guidance = o.Memory.Guidance(1500)
+		if block := memoryBlock(recalled); block != "" {
+			guidance = strings.TrimSpace(guidance + "\n" + block)
+		}
 	}
 	sys := assemble.Assemble(assemble.Context{
 		Role:           role,
@@ -687,6 +703,28 @@ func (o *Orchestrator) buildMessages(conv *conversation.Conversation, role *role
 		}
 	}
 	return append(msgs, pending...)
+}
+
+// memoryBlock renders the recalled memories for the system prompt. It is capped:
+// recall can return several long entries and this block ships on every turn.
+//
+// The entries are phrased as background facts the user may since have corrected,
+// because that is what they are — stale memories outrank nothing.
+func memoryBlock(mem []memory.MemoryResult) string {
+	if len(mem) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("可能与本次提问相关的长期记忆（若与用户当前说法冲突，以当前说法为准）：\n")
+	for _, m := range mem {
+		line := "- [" + m.Level + "] " + strings.TrimSpace(m.Content) + "\n"
+		if b.Len()+len(line) > 1200 {
+			b.WriteString("- （其余记忆省略）\n")
+			break
+		}
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // contextBudget is the token allowance for conversation history. The role's
