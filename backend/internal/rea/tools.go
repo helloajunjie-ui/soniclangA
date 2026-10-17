@@ -9,6 +9,7 @@ import (
 
 	"github.com/agenthub/agent-proxy/internal/tool"
 	"github.com/agenthub/agent-proxy/internal/tool/registry"
+	"github.com/agenthub/agent-proxy/internal/workspace"
 )
 
 // The tools below are how the model is supposed to approach a GUI-only app:
@@ -209,7 +210,7 @@ func (planTool) Schema() map[string]interface{} {
 		"required": []string{"app", "action"},
 	}
 }
-func (t planTool) Execute(_ context.Context, args map[string]interface{}) (string, error) {
+func (t planTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	app, _ := args["app"].(string)
 	action, _ := args["action"].(string)
 	vars := map[string]string{}
@@ -218,6 +219,13 @@ func (t planTool) Execute(_ context.Context, args map[string]interface{}) (strin
 			if s, ok := v.(string); ok {
 				vars[k] = s
 			}
+		}
+	}
+	// DIR defaults to the task workspace: recorded steps use ${DIR} instead of a
+	// hard-coded path, so the same adapter works for the next task too.
+	if _, ok := vars["DIR"]; !ok {
+		if dir := workspace.FromContext(ctx); dir != "" {
+			vars["DIR"] = dir
 		}
 	}
 	steps, err := t.svc.Resolve(app, action, vars)

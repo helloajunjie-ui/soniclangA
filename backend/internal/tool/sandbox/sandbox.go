@@ -27,6 +27,7 @@ import (
 	"github.com/agenthub/agent-proxy/internal/tool/registry"
 	"github.com/agenthub/agent-proxy/internal/tool/schema"
 	"github.com/agenthub/agent-proxy/internal/util"
+	"github.com/agenthub/agent-proxy/internal/workspace"
 )
 
 // Supported runtimes.
@@ -194,6 +195,11 @@ func (s *ScriptTool) Execute(ctx context.Context, args map[string]interface{}) (
 	}
 
 	cmd := exec.CommandContext(cctx, bin, f.Name())
+	// A script writes relative paths; run it in the task workspace so its output
+	// lands where the user (and the other tools) expect it.
+	if dir := workspace.FromContext(ctx); dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Env = env
 	cmd.Stdin = strings.NewReader(input)
 	// Cap the buffers at ~4x the output limit: without a cap, `cat /dev/urandom`
