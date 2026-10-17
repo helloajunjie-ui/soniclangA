@@ -114,6 +114,23 @@ cd backend && go test ./...   # 27 个包有测试，295 个测试函数
 > 空操作（不报错也不删），vite 的 `emptyDir()` 正好用的它，于是 embed 目录只增不减。
 > 清理脚本走 `unlinkSync`/`rmdirSync`，不碰 `rmSync`。
 
+### 前端组件约定
+
+Element Plus **按需引入**（`vite.config.ts` 里的 `unplugin-vue-components`）：
+模板里写 `<el-xxx>` 就行，插件会 import 对应组件和它的样式，`src/components.d.ts`
+由构建自动生成（已入库，别手改），`vue-tsc` 靠它校验组件 prop 类型。
+
+两处例外要手写，**别再把 `app.use(ElementPlus)` 加回来**（那会让首屏 chunk 从
+410 kB 涨回 1.22 MB）：
+
+- 服务式 API `ElMessage` / `ElMessageBox` 的样式，在 `main.ts` 里显式 import；
+- 指令 `v-loading` 需要 `app.use(ElLoading)` 显式注册。
+
+图标仍是全量注册：模板里有 `<component :is="'CircleCheck'">` 这种按名字动态取用
+的情况，按需引入漏掉一个就是特定状态下的空白图标。
+
+首屏 JS（gzip）：`index` 391 → 134 kB，`ChatView` 279 → 114 kB；mermaid 单独懒加载。
+
 ## 安全边界
 
 - 默认只监听 `127.0.0.1:8787`。

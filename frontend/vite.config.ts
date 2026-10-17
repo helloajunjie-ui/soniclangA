@@ -1,11 +1,30 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
 
 // The dev server proxies /api and /v1 to the Go backend so the browser sees a
 // single origin — no CORS preflight, and cookies/headers stay simple.
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    // Element Plus 按需引入。
+    //
+    // 之前是 main.ts 里 app.use(ElementPlus) + 全量 element-plus/dist/index.css，
+    // 于是首屏那个 chunk 里塞着整个组件库（1.22 MB / gzip 391 kB），用户为
+    // 十几个用不到的组件付出下载与解析代价。这里改成模板里出现哪个 <el-xxx>
+    // 就 import 哪个，样式同样按组件引入（每个组件的 style/css 自己会带上
+    // base.css 及其依赖）。
+    //
+    // 解析不到的两类东西要手写，见 main.ts：服务式 API（ElMessage /
+    // ElMessageBox）和指令（v-loading）。
+    Components({
+      resolvers: [ElementPlusResolver({ importStyle: 'css' })],
+      // 生成 src/components.d.ts，让 vue-tsc / IDE 认识自动引入的组件。
+      dts: 'src/components.d.ts',
+    }),
+  ],
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
@@ -26,4 +45,6 @@ export default defineConfig({
     emptyOutDir: true,
     chunkSizeWarningLimit: 1500,
   },
+  // 自动引入的组件类型声明在构建/开发时写入 src/components.d.ts；
+  // 它不改运行时行为。
 })

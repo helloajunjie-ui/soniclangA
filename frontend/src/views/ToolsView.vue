@@ -21,7 +21,12 @@ const SOURCE_LABEL: Record<string, string> = {
   mcp: 'MCP',
 }
 
-const STATUS_TAG: Record<string, string> = {
+// el-tag 的 type 是有限联合，不是任意 string。之前组件由 app.use(ElementPlus)
+// 全量注册，模板里的 prop 类型是 any，写错也检查不出来；改成按需引入之后
+// 组件带上了真实类型，这里的 Record<string, string> 就会报错。
+type TagType = 'success' | 'info' | 'warning' | 'danger'
+
+const STATUS_TAG: Record<string, TagType> = {
   running: 'success',
   stopped: 'info',
   starting: 'warning',
@@ -81,7 +86,7 @@ const scriptTools = computed(() => tools.value.filter((t) => t.source === 'scrip
 const mcpTools = computed(() => tools.value.filter((t) => t.source === 'mcp'))
 
 /** Admission verdict shown as a tag on each script row. */
-function admissionTag(s: any) {
+function admissionTag(s: any): { type: TagType; text: string } {
   if (!s.admission) return { type: 'info', text: '未校验' }
   if (s.admission.ok) return { type: 'success', text: '已准入' }
   const gateName: Record<string, string> = {

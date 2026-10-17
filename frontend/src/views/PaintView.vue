@@ -19,7 +19,10 @@ const background = ref('auto')
 const n = ref(1)
 const prompt = ref('')
 const busy = ref(false)
-const advanced = ref(false)
+// el-collapse 的 v-model 是「展开的面板 name 列表」，不是一个开关布尔值。
+// 之前写成 ref(false)，语义上靠运行时被覆盖成 ['adv'] 才碰巧能用；
+// 类型收窄之后这里就是显式约定。展开状态由 collapse 自己管。
+const advanced = ref<string[]>([])
 const refImages = ref('')
 
 // 消息流：每条生成是一条消息（prompt + 图片列表）
