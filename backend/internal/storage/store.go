@@ -211,8 +211,20 @@ func Open(dataDir, ns, dir, driver string) (Store, error) {
 		dbPath := filepath.Join(dataDir, "agenthub.db")
 		st, err := NewSQLite(dbPath, ns, dir)
 		if err == nil {
-			if n, mErr := migrateJSONToSQLite(dir, ns, st); mErr == nil && n > 0 {
+			n, mErr := migrateJSONToSQLite(dir, ns, st)
+			if n > 0 {
 				fmt.Fprintf(os.Stderr, "storage: migrated %d items from JSON into sqlite (ns=%s)\n", n, ns)
+			}
+			// A failed migration used to be dropped on the floor. The damage is
+			// silent and permanent: whatever did get written makes the "already
+			// migrated" guard true on the next boot, so the rest of the namespace
+			// never arrives, and the leftover JSON files keep serving as a second,
+			// stale source of truth through the fallback path.
+			if mErr != nil {
+				fmt.Fprintf(os.Stderr,
+					"storage: JSON→sqlite migration INCOMPLETE for ns=%s after %d items: %v "+
+						"(remaining JSON files kept; retrying requires clearing that namespace's rows)\n",
+					ns, n, mErr)
 			}
 			return st, nil
 		}

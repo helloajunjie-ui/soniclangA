@@ -422,6 +422,11 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 	// pushes Steps past maxSteps, so a loop bounded by < never let it fire — the
 	// ceiling was unreachable and an exhausted turn fell out to the "done" below.
 	for step := 0; step <= maxSteps; step++ {
+		// A step is a model call plus, potentially, the tools it asks for. Bailing
+		// here means a cancelled turn cannot start another one.
+		if ctx.Err() != nil {
+			return
+		}
 		if sig, why := guard.Tick(); sig == loopguard.SignalStop {
 			logx.Warnf("loopguard conv=%s 步数上限触发: %s", conv.ID, why)
 			emit("error", map[string]interface{}{"code": "loopguard", "message": why})
@@ -525,15 +530,26 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 		// persist assistant message (citations travel with the turn). A
 		// "continue" grows the existing reply in place; anything else appends a
 		// fresh assistant turn.
+		//
+		// The error matters now: it used to be discarded and "done" was emitted
+		// anyway, so a storage failure streamed a complete-looking answer that
+		// never reached history and vanished on the next reload, with the UI
+		// offering no hint that anything went wrong.
 		if continueMode && in.TargetID != "" {
-			_ = o.Conversations.AppendToMessage(conv.ID, in.TargetID, content)
+			if err := o.Conversations.AppendToMessage(conv.ID, in.TargetID, content); err != nil {
+				emit("error", map[string]interface{}{"code": "persist_failed", "message": "回答未能保存：" + err.Error()})
+				return
+			}
 		} else {
-			_ = o.Conversations.AppendMessage(conv.ID, conversation.Message{
+			if err := o.Conversations.AppendMessage(conv.ID, conversation.Message{
 				ID: assistantID, Role: "assistant", Content: content, Reasoning: reasoning,
 				ToolCalls: toolCalls, ProviderId: providerID, Model: gotModel,
 				Usage: usage, FinishReason: "stop", Status: "done",
 				Citations: toConvCitations(cites),
-			})
+			}); err != nil {
+				emit("error", map[string]interface{}{"code": "persist_failed", "message": "回答未能保存：" + err.Error()})
+				return
+			}
 		}
 
 		if len(toolCalls) == 0 {
@@ -548,6 +564,15 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 		}
 
 		// tool loop
+		//
+		// Cancellation is checked here, not only inside the chunk loop above: if
+		// the client disconnected while the assistant message was being persisted
+		// (or between steps), control still reached this point and the tools ran —
+		// shell_exec, control_*, MCP calls executed and were persisted for a user
+		// who had already closed the tab.
+		if ctx.Err() != nil {
+			return
+		}
 		results := loop.Execute(ctx, o.Tools, toolCalls, o.permissionGate(role, conv))
 		var toolMsgs []provider.Message
 		for _, tc := range toolCalls {

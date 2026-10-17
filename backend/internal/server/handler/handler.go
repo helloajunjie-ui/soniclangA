@@ -319,6 +319,10 @@ func (h *Handler) json(w http.ResponseWriter, code int, v interface{}) {
 // roughly three orders of magnitude above the largest legitimate one.
 const maxJSONBody = 32 << 20
 
+// maxUploadBody caps a document upload. Generous on purpose (multi-hundred-page PDFs are a real case) but finite: without it a single request could fill the disk
+// through the multipart spill file regardless of the in-memory threshold.
+const maxUploadBody = 512 << 20
+
 // readBody reads a request body with that cap applied.
 func readBody(r *http.Request) ([]byte, error) {
 	return io.ReadAll(http.MaxBytesReader(nil, r.Body, maxJSONBody))
@@ -1306,6 +1310,9 @@ func (h *Handler) uploadDocument(w http.ResponseWriter, r *http.Request, collID 
 	)
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
+		// Cap the whole body, not just the in-memory threshold: ParseMultipartForm
+		// spills to temp files, so an unbounded body could still fill the disk.
+		r.Body = http.MaxBytesReader(w, r.Body, maxUploadBody)
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
 			http.Error(w, "bad multipart: "+err.Error(), http.StatusBadRequest)
 			return
@@ -1361,9 +1368,16 @@ func (h *Handler) uploadDocument(w http.ResponseWriter, r *http.Request, collID 
 		path, _ = h.Ingest.Stage(doc.ID, data)
 	}
 	jobID := util.NewID()
+	// The staged file is the job's input; only fall back to embedding the bytes
+	// when staging failed. Sending both duplicated the whole document into the job
+	// payload (and from there into the job status file on disk).
+	raw := []byte(nil)
+	if path == "" {
+		raw = data
+	}
 	payload, _ := json.Marshal(ingest.Payload{
 		JobID: jobID, CollectionID: collID, DocID: doc.ID,
-		Raw: data, RawPath: path,
+		Raw: raw, RawPath: path,
 	})
 	if _, err := h.Jobs.Submit(job.Job{ID: jobID, Type: ingest.TypeIngestDocument, Payload: payload}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
