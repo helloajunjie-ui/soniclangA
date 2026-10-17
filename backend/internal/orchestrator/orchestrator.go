@@ -18,6 +18,7 @@ import (
 	"github.com/agenthub/agent-proxy/internal/conversation"
 	"github.com/agenthub/agent-proxy/internal/envprobe"
 	"github.com/agenthub/agent-proxy/internal/knowledge"
+	"github.com/agenthub/agent-proxy/internal/logx"
 	"github.com/agenthub/agent-proxy/internal/memory"
 	"github.com/agenthub/agent-proxy/internal/methodology"
 	"github.com/agenthub/agent-proxy/internal/module"
@@ -91,6 +92,11 @@ type ChatInput struct {
 	// Reasoning overrides the thinking effort (low|medium|high) for models that
 	// expose it (OpenAI o-series). Empty means the model's default.
 	Reasoning string `json:"reasoning,omitempty"`
+	// Action drives the bubble-edit operations. "" is a normal new turn;
+	// "regenerate" re-runs the reply after TargetID; "continue" grows the
+	// assistant reply at TargetID in place.
+	Action   string `json:"action,omitempty"`
+	TargetID string `json:"target,omitempty"`
 }
 
 // Orchestrator wires the main loop together.
@@ -274,24 +280,56 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 		emit("route", map[string]interface{}{
 			"mode": d.Mode, "confidence": d.Confidence, "reason": d.Reason, "source": d.Source,
 		})
+		logx.Debugf("route conv=%s -> mode=%s conf=%.2f source=%s", conv.ID, d.Mode, d.Confidence, d.Source)
 		if conversation.Mode(d.Mode) != conv.Mode {
 			mode = conversation.Mode(d.Mode)
 			_ = o.Conversations.SetMode(conv.ID, mode)
 		}
 	}
 	if mode == conversation.ModeTask {
-		emit("plan", map[string]interface{}{"goal": in.Message, "steps": []map[string]interface{}{{"id": "s1", "title": in.Message, "dependsOn": []string{}}}})
+		// Real planning: one short bounded call to outline the steps before the
+		// model starts acting. Best-effort — a failure yields no plan and the
+		// main turn still proceeds.
+		if steps := o.BuildPlan(ctx, providerID, model, in.Message); len(steps) > 0 {
+			emit("plan", map[string]interface{}{"goal": in.Message, "steps": steps})
+			logx.Infof("task conv=%s 已生成 %d 步计划", conv.ID, len(steps))
+		} else {
+			logx.Debugf("task conv=%s 计划生成失败或为空，直接进入执行", conv.ID)
+		}
 	}
 
-	// persist user message
-	if err := o.Conversations.AppendMessage(conv.ID, conversation.Message{Role: "user", Content: in.Message, Status: "sent"}); err != nil {
-		emit("error", map[string]interface{}{"code": "append_failed", "message": err.Error()})
-		return
+	// Bubble-edit operations ("regenerate" / "continue") reuse the existing
+	// tail instead of appending a fresh user message. For regenerate the old
+	// assistant reply and everything after it are trimmed first and the last
+	// user message becomes the prompt; for continue the assistant reply at
+	// TargetID is grown in place.
+	continueMode := in.Action == "continue"
+	actionMode := in.Action != ""
+	if in.Action == "regenerate" && in.TargetID != "" {
+		if err := o.Conversations.TrimMessages(conv.ID, in.TargetID); err == nil {
+			if ms, err := o.Conversations.Messages(conv.ID); err == nil {
+				for i := len(ms) - 1; i >= 0; i-- {
+					if ms[i].Role == "user" {
+						in.Message = ms[i].Content
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// persist user message (skipped for regenerate/continue: the tail already
+	// holds it, or we are extending an existing reply)
+	if !actionMode {
+		if err := o.Conversations.AppendMessage(conv.ID, conversation.Message{Role: "user", Content: in.Message, Status: "sent"}); err != nil {
+			emit("error", map[string]interface{}{"code": "append_failed", "message": err.Error()})
+			return
+		}
 	}
 
 	// knowledge recall (M3a): role-bound collections, BM25+vector fused by RRF
 	var cites []knowledge.Citation
-	if o.Knowledge != nil && o.moduleEnabled("rag.knowledge") && len(role.KnowledgeCollectionIds) > 0 {
+	if o.Knowledge != nil && o.moduleEnabled("rag.knowledge") && len(role.KnowledgeCollectionIds) > 0 && !continueMode {
 		topK := role.RetrievalTopK
 		if topK <= 0 {
 			topK = 5
@@ -299,9 +337,16 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 		cites = o.Knowledge.SearchCollections(role.KnowledgeCollectionIds, in.Message, topK)
 	}
 
-	// build initial messages (knowledge is injected into the system prompt)
+	// build initial messages (knowledge is injected into the system prompt).
+	// The current user message is already persisted (see AppendMessage above),
+	// so buildMessages already includes it in history — do not append it again,
+	// or the model sees the same user turn twice. A continue turn appends an
+	// invisible "keep writing" instruction as the model input tail; it is not
+	// persisted as a user message.
 	msgs := o.buildMessages(conv, role, cites, in.Message)
-	msgs = append(msgs, provider.Message{Role: "user", Content: in.Message})
+	if continueMode {
+		msgs = append(msgs, provider.Message{Role: "user", Content: "（请继续刚才的回答，从上一句接着往下写，不要重复）"})
+	}
 
 	// context event: injected knowledge + recalled memory (DESIGN §15.1)
 	{
@@ -323,20 +368,26 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 		}
 	}
 
-	guard := &loopguard.State{}
 	maxSteps := role.MaxSteps
 	if maxSteps == 0 {
 		maxSteps = 30
 	}
+	guard := loopguard.New(maxSteps)
 	if mode == conversation.ModeTask {
 		_ = o.Conversations.UpdateMeta(conv.ID, conversation.MetaPatch{})
 	}
 
 	assistantID := util.NewID()
+	if continueMode && in.TargetID != "" {
+		assistantID = in.TargetID
+	}
 	chain := failover.NewChain()
-	for step := 0; step < maxSteps; step++ {
-		guard.Steps++
-		if stop, why := loopguard.Check(guard); stop {
+	// <= rather than <: the guard's Tick only returns SignalStop on the call that
+	// pushes Steps past maxSteps, so a loop bounded by < never let it fire — the
+	// ceiling was unreachable and an exhausted turn fell out to the "done" below.
+	for step := 0; step <= maxSteps; step++ {
+		if sig, why := guard.Tick(); sig == loopguard.SignalStop {
+			logx.Warnf("loopguard conv=%s 步数上限触发: %s", conv.ID, why)
 			emit("error", map[string]interface{}{"code": "loopguard", "message": why})
 			return
 		}
@@ -360,6 +411,8 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 			if fb != nil {
 				fromP, fromM := providerID, model
 				providerID, model = fb.ProviderId, fb.Model
+				logx.Warnf("fallback conv=%s %s/%s -> %s/%s，原因: %s，原始错误: %v",
+					conv.ID, fromP, fromM, providerID, model, fb.Reason, err)
 				emit("fallback", map[string]interface{}{
 					"from":   map[string]string{"providerId": fromP, "model": fromM},
 					"to":     map[string]string{"providerId": providerID, "model": model},
@@ -367,6 +420,7 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 				})
 				continue
 			}
+			logx.Errorf("stream_failed conv=%s provider=%s model=%s: %v", conv.ID, providerID, model, err)
 			emit("error", map[string]interface{}{"code": "stream_failed", "message": err.Error()})
 			return
 		}
@@ -432,13 +486,19 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 			gotModel = model
 		}
 
-		// persist assistant message (citations travel with the turn)
-		_ = o.Conversations.AppendMessage(conv.ID, conversation.Message{
-			ID: assistantID, Role: "assistant", Content: content, Reasoning: reasoning,
-			ToolCalls: toolCalls, ProviderId: providerID, Model: gotModel,
-			Usage: usage, FinishReason: "stop", Status: "done",
-			Citations: toConvCitations(cites),
-		})
+		// persist assistant message (citations travel with the turn). A
+		// "continue" grows the existing reply in place; anything else appends a
+		// fresh assistant turn.
+		if continueMode && in.TargetID != "" {
+			_ = o.Conversations.AppendToMessage(conv.ID, in.TargetID, content)
+		} else {
+			_ = o.Conversations.AppendMessage(conv.ID, conversation.Message{
+				ID: assistantID, Role: "assistant", Content: content, Reasoning: reasoning,
+				ToolCalls: toolCalls, ProviderId: providerID, Model: gotModel,
+				Usage: usage, FinishReason: "stop", Status: "done",
+				Citations: toConvCitations(cites),
+			})
+		}
 
 		if len(toolCalls) == 0 {
 			emit("done", map[string]interface{}{
@@ -459,17 +519,40 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 		}
 		assistantMsg := provider.Message{Role: "assistant", Content: content, ToolCalls: toolCalls}
 		toolMsgs = append(toolMsgs, assistantMsg)
-		for _, r := range results {
-			emit("tool_result", map[string]interface{}{"messageId": assistantID, "toolCallId": r.ID, "name": r.Name, "result": r.Result, "truncated": false})
+		for i, r := range results {
+			argsJSON := ""
+			if i < len(toolCalls) {
+				argsJSON = toolCalls[i].Arguments
+			}
+			failed := r.Err != ""
+			// Feed the watchdog; a warning is injected into the tool result so
+			// the model itself can see it and self-correct on the next step.
+			sig, why := guard.Observe(r.Name, loopguard.Signature(r.Name, argsJSON), r.Result, failed)
+			if sig == loopguard.SignalWarn {
+				r.Result = r.Result + "\n\n[系统提示] " + why
+			}
+			emit("tool_result", map[string]interface{}{"messageId": assistantID, "toolCallId": r.ID, "name": r.Name, "result": r.Result, "failed": failed, "truncated": false})
 			toolMsgs = append(toolMsgs, provider.Message{Role: "tool", ToolCallID: r.ID, Content: r.Result})
-			_ = o.Conversations.AppendMessage(conv.ID, conversation.Message{Role: "tool", ToolCallId: r.ID, Content: r.Result, Status: "done"})
+			_ = o.Conversations.AppendMessage(conv.ID, conversation.Message{Role: "tool", ToolCallId: r.ID, Content: r.Result, Status: map[bool]string{true: "error", false: "done"}[failed]})
+			if sig == loopguard.SignalStop {
+				logx.Warnf("loopguard conv=%s 工具循环硬停: %s", conv.ID, why)
+				emit("error", map[string]interface{}{"code": "loopguard", "message": why})
+				return
+			}
 		}
 		msgs = append(msgs, toolMsgs...)
 		assistantID = util.NewID() // next assistant turn
 	}
 
-	emit("done", map[string]interface{}{"messageId": assistantID, "model": model, "providerId": providerID, "finishReason": "length", "citations": cites})
-	o.distillMemories(conv.ID, providerID, model)
+	// Reaching here means the step ceiling was hit with tool calls still pending:
+	// every other exit returns from inside the loop. This used to emit "done"
+	// with finishReason=length and the messageId generated for the *next* turn —
+	// a cut-off task was reported as success, with a done event pointing at a
+	// message that was never persisted, so the UI offered no retry.
+	emit("error", map[string]interface{}{
+		"code":    "loopguard",
+		"message": "已达到最大工具循环步数，任务可能过于复杂或陷入循环，已自动停止。请缩小任务范围或换个说法重试。",
+	})
 }
 
 // distillMemories runs L1 extraction after a turn settles. It runs in the
@@ -656,6 +739,9 @@ const (
 var readOnlyTools = map[string]bool{
 	"calculator": true, "memory_search": true, "conversation_search": true,
 	"knowledge_search": true, "note": true, "timer": true,
+	// Pure read-only tools: they fetch information and never mutate the machine
+	// or the user's files, so they are safe to auto-run at the ask tier.
+	"get_time": true, "http_fetch": true, "web_search": true, "web_fetch": true,
 	// env_probe only reads directory names and PATH (DESIGN §9.3). It is the
 	// step that has to work at every tier: "what can this machine do the job
 	// with" is the question the very first sentence of a task turns on, and a

@@ -28,16 +28,27 @@ func (a *openAIAdapter) ChatStream(ctx context.Context, messages []Message, opts
 	ch := make(chan StreamChunk)
 	go func() {
 		defer close(ch)
-		var lastErr error
+		var lastErr, firstErr error
 		tries := len(a.entity.Keys) + 1
 		for attempt := 0; attempt < tries; attempt++ {
 			ref, err := a.selectKey()
 			if err != nil {
-				lastErr = err
+				// Report the first real failure, not the retry bookkeeping. With
+				// a single key the failed attempt benches it, so this branch says
+				// "all keys in cooldown" — which hides the 401/500 that actually
+				// caused it behind a message the user cannot act on.
+				if firstErr != nil {
+					lastErr = firstErr
+				} else {
+					lastErr = err
+				}
 				break
 			}
 			secret, err := a.secret(ref)
 			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
 				lastErr = err
 				a.markCooldown(ref)
 				continue
@@ -45,6 +56,9 @@ func (a *openAIAdapter) ChatStream(ctx context.Context, messages []Message, opts
 			ok, streamErr := a.streamOnce(ctx, ch, secret, messages, opts)
 			if ok {
 				return
+			}
+			if firstErr == nil {
+				firstErr = streamErr
 			}
 			lastErr = streamErr
 			a.markCooldown(ref)
@@ -71,7 +85,9 @@ func (a *openAIAdapter) streamOnce(ctx context.Context, ch chan StreamChunk, sec
 	for k, v := range a.entity.Headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 300 * time.Second,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
@@ -352,9 +368,9 @@ func (a *openAIAdapter) GenerateImage(ctx context.Context, model, prompt string,
 	}
 	var out struct {
 		Data []struct {
-			URL      string `json:"url"`
-			B64JSON  string `json:"b64_json"`
-			Revised  string `json:"revised_prompt"`
+			URL     string `json:"url"`
+			B64JSON string `json:"b64_json"`
+			Revised string `json:"revised_prompt"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

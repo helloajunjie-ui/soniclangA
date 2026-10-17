@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/agenthub/agent-proxy/internal/keyvault"
+	"github.com/agenthub/agent-proxy/internal/logx"
 	"github.com/agenthub/agent-proxy/internal/provider/health"
 )
 
@@ -40,16 +41,24 @@ func (k *keyring) selectKey() (string, error) {
 		return "", fmt.Errorf("provider %s has no keys", k.entity.ID)
 	}
 	now := time.Now().UnixMilli()
+	var soonest int64 = 1<<62 - 1
 	for i := 0; i < len(k.entity.Keys); i++ {
 		idx := (k.keyIdx + i) % len(k.entity.Keys)
 		key := k.entity.Keys[idx]
 		if key.CooldownUntil > now {
+			if key.CooldownUntil < soonest {
+				soonest = key.CooldownUntil
+			}
 			continue
 		}
 		k.keyIdx = (idx + 1) % len(k.entity.Keys)
 		return key.Ref, nil
 	}
-	return "", fmt.Errorf("all keys of provider %s are in cooldown", k.entity.ID)
+	secs := (soonest - now + 999) / 1000
+	if secs < 1 {
+		secs = 1
+	}
+	return "", fmt.Errorf("all keys of provider %s are in cooldown（最快约 %d 秒后恢复）", k.entity.ID, secs)
 }
 
 // markCooldown benches a key for the provider's cooldown window and mirrors the
@@ -68,6 +77,7 @@ func (k *keyring) markCooldown(ref string) {
 			k.entity.Keys[i].Status = "cooldown"
 		}
 	}
+	logx.Warnf("provider %s 的一个 key 被冷却 %d 秒（调用失败/限流）", k.entity.ID, secs)
 	if k.health != nil {
 		k.health.SetCooldown(until)
 	}

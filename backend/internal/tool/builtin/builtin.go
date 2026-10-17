@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -192,7 +194,13 @@ func (httpTool) Schema() map[string]interface{} {
 		"required":   []string{"url"},
 	}
 }
-func (httpTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+func (httpTool) Execute(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+			err = fmt.Errorf("HTTP 请求内部错误: %v", r)
+		}
+	}()
 	raw, _ := args["url"].(string)
 	if err := guardSSRF(raw); err != nil {
 		return "", err
@@ -201,7 +209,9 @@ func (httpTool) Execute(ctx context.Context, args map[string]interface{}) (strin
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -290,12 +300,318 @@ func topKOf(args map[string]interface{}) int {
 	return 5
 }
 
+// ---- web_search (Bing CN, no API key, with timeout) ----
+
+type webSearchTool struct{}
+
+func (webSearchTool) Name() string { return "web_search" }
+func (webSearchTool) Description() string {
+	return "网络搜索（Bing+百度多源聚合，自动切换），返回标题+链接+摘要；时效性内容用它最合适"
+}
+func (webSearchTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query":       map[string]interface{}{"type": "string", "description": "搜索关键词"},
+			"max_results": map[string]interface{}{"type": "integer", "description": "返回条数，默认 5"},
+		},
+		"required": []string{"query"},
+	}
+}
+func (webSearchTool) Execute(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	// Panic guard: a malformed response must never crash the whole server.
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+			err = fmt.Errorf("搜索内部错误: %v", r)
+		}
+	}()
+
+	q, _ := args["query"].(string)
+	if q == "" {
+		return "", errors.New("query 不能为空")
+	}
+	maxN := 5
+	if v, ok := args["max_results"].(float64); ok && v > 0 {
+		maxN = int(v)
+	}
+
+	// Multi-source search: try Bing CN first, fall back to Baidu if results look bad.
+	sources := []struct {
+		name  string
+		url   string
+		parse func(html string, maxN int) []searchResult
+	}{
+		{"Bing", "https://cn.bing.com/search?q=" + url.QueryEscape(q) + "&count=" + strconv.Itoa(maxN*2), parseBingResults},
+		{"百度", "https://www.baidu.com/s?wd=" + url.QueryEscape(q) + "&rn=" + strconv.Itoa(maxN*2), parseBaiduResults},
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	for _, src := range sources {
+		results := trySearchSource(ctx, client, src.url, src.parse, maxN)
+		if len(results) == 0 {
+			continue
+		}
+		// Quality check: if the first result title doesn't contain any meaningful
+		// substring of the query, this source likely split the keyword badly.
+		if !resultsLookRelevant(results, q) {
+			continue
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "[%s] 搜索结果：\n\n", src.name)
+		for i, r := range results {
+			fmt.Fprintf(&sb, "%d. %s\n   %s\n   %s\n\n", i+1, r.Title, r.URL, r.Snippet)
+		}
+		return sb.String(), nil
+	}
+	return "未找到相关结果（已尝试多个搜索引擎）", nil
+}
+
+func trySearchSource(ctx context.Context, client *http.Client, searchURL string, parse func(html string, maxN int) []searchResult, maxN int) []searchResult {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	return parse(string(b), maxN)
+}
+
+type searchResult struct {
+	Title   string
+	URL     string
+	Snippet string
+}
+
+// resultsLookRelevant checks if the search results seem to actually match the query.
+// If the top result's title doesn't contain any 2+ char substring of the query,
+// the search engine probably split the keyword (e.g. "柳岩" → "柳" dictionary entry).
+func resultsLookRelevant(results []searchResult, query string) bool {
+	if len(results) == 0 {
+		return false
+	}
+	// Extract meaningful 2+ char substrings from the query (excluding quotes, spaces).
+	q := strings.Trim(query, `"' `)
+	if len(q) < 2 {
+		return true // too short to judge, accept it
+	}
+	// Check if any result title contains at least one 2-char substring of the query.
+	for i := 0; i+2 <= len(q); i++ {
+		sub := q[i : i+2]
+		for _, r := range results[:3] {
+			if strings.Contains(r.Title, sub) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parseBingResults(html string, maxN int) []searchResult {
+	// Bing wraps organic results in <li class="b_algo"> blocks.
+	blockRe := regexp.MustCompile(`(?is)<li class="b_algo"[^>]*>(.*?)</li>`)
+	linkRe := regexp.MustCompile(`<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>`)
+	snipRe := regexp.MustCompile(`<p[^>]*>(.*?)</p>`)
+	var results []searchResult
+	blocks := blockRe.FindAllStringSubmatch(html, -1)
+	for _, b := range blocks {
+		if len(results) >= maxN {
+			break
+		}
+		lm := linkRe.FindStringSubmatch(b[1])
+		if lm == nil {
+			continue
+		}
+		title := stripTags(lm[2])
+		url := lm[1]
+		snippet := ""
+		if sm := snipRe.FindStringSubmatch(b[1]); sm != nil {
+			snippet = stripTags(sm[1])
+		}
+		if title == "" {
+			continue
+		}
+		results = append(results, searchResult{Title: title, URL: url, Snippet: snippet})
+	}
+	return results
+}
+
+func parseBaiduResults(html string, maxN int) []searchResult {
+	// Baidu wraps organic results in <div class="result c-container ..."> blocks.
+	// Title in <h3 class="t"><a href="...">title</a></h3>, snippet in <span class="content-right_8Zs40"> or similar.
+	blockRe := regexp.MustCompile(`(?is)<div[^>]*class="[^"]*result[^"]*c-container[^"]*"[^>]*>(.*?)</div>\s*(?=<div[^>]*class="[^"]*result|<div id="page")`)
+	linkRe := regexp.MustCompile(`<h3[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>\s*</h3>`)
+	snipRe := regexp.MustCompile(`<span[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</span>`)
+	var results []searchResult
+	blocks := blockRe.FindAllStringSubmatch(html, -1)
+	for _, b := range blocks {
+		if len(results) >= maxN {
+			break
+		}
+		lm := linkRe.FindStringSubmatch(b[1])
+		if lm == nil {
+			continue
+		}
+		title := stripTags(lm[2])
+		url := lm[1]
+		snippet := ""
+		if sm := snipRe.FindStringSubmatch(b[1]); sm != nil {
+			snippet = stripTags(sm[1])
+		}
+		if title == "" {
+			continue
+		}
+		results = append(results, searchResult{Title: title, URL: url, Snippet: snippet})
+	}
+	return results
+}
+
+func stripTags(s string) string {
+	re := regexp.MustCompile(`<[^>]+>`)
+	return strings.TrimSpace(re.ReplaceAllString(s, ""))
+}
+
+// ---- web_fetch (fetch URL and extract readable text) ----
+
+type webFetchTool struct{}
+
+func (webFetchTool) Name() string { return "web_fetch" }
+func (webFetchTool) Description() string {
+	return "抓取网页正文（自动去 HTML 标签，提取可读文本），适合获取文章/文档内容"
+}
+func (webFetchTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"url": map[string]interface{}{"type": "string", "description": "要抓取的网页 URL"},
+		},
+		"required": []string{"url"},
+	}
+}
+func (webFetchTool) Execute(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+			err = fmt.Errorf("网页抓取内部错误: %v", r)
+		}
+	}()
+	raw, _ := args["url"].(string)
+	if err := guardSSRF(raw); err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 AgentHub/1.0")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("http %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 131072))
+	text := htmlToText(string(b))
+	if len(text) > 8192 {
+		text = text[:8192] + "\n…（内容已截断）"
+	}
+	return text, nil
+}
+
+func htmlToText(html string) string {
+	// 去掉 script/style（Go RE2 不支持反向引用 \1，分两条写）
+	html = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`).ReplaceAllString(html, "")
+	html = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`).ReplaceAllString(html, "")
+	// <br> 和 <p> 换成换行
+	re := regexp.MustCompile(`(?i)<br\s*/?>|<p[^>]*>|</p>|<div[^>]*>|</div>|<li[^>]*>|</li>|<h[1-6][^>]*>|</h[1-6]>`)
+	html = re.ReplaceAllString(html, "\n")
+	// 去所有标签
+	re = regexp.MustCompile(`<[^>]+>`)
+	html = re.ReplaceAllString(html, "")
+	// 解码常见实体
+	html = strings.ReplaceAll(html, "&nbsp;", " ")
+	html = strings.ReplaceAll(html, "&amp;", "&")
+	html = strings.ReplaceAll(html, "&lt;", "<")
+	html = strings.ReplaceAll(html, "&gt;", ">")
+	html = strings.ReplaceAll(html, "&quot;", `"`)
+	html = strings.ReplaceAll(html, "&#39;", "'")
+	// 压缩空行
+	re = regexp.MustCompile(`\n{3,}`)
+	html = re.ReplaceAllString(html, "\n\n")
+	return strings.TrimSpace(html)
+}
+
+// ---- shell_exec (run system commands) ----
+
+type shellExecTool struct{}
+
+func (shellExecTool) Name() string { return "shell_exec" }
+func (shellExecTool) Description() string {
+	return "执行系统命令（PowerShell/cmd），返回 stdout+stderr；用于安装软件、跑脚本、查环境"
+}
+func (shellExecTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"command": map[string]interface{}{"type": "string", "description": "要执行的命令"},
+			"timeout": map[string]interface{}{"type": "integer", "description": "超时秒数，默认 30"},
+		},
+		"required": []string{"command"},
+	}
+}
+func (shellExecTool) Execute(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+			err = fmt.Errorf("命令执行内部错误: %v", r)
+		}
+	}()
+	cmdStr, _ := args["command"].(string)
+	if cmdStr == "" {
+		return "", errors.New("command 不能为空")
+	}
+	timeout := 30
+	if v, ok := args["timeout"].(float64); ok && v > 0 {
+		timeout = int(v)
+	}
+	if timeout > 300 {
+		timeout = 300
+	}
+	// Enforce a hard wall-clock timeout with an independent context.
+	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+	// Use PowerShell on Windows.
+	cmd := exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command", cmdStr)
+	out, err := cmd.CombinedOutput()
+	if cmdCtx.Err() == context.DeadlineExceeded {
+		return fmt.Sprintf("命令超时（%d 秒），已终止。已输出:\n%s", timeout, string(out)), nil
+	}
+	if err != nil {
+		return fmt.Sprintf("exit code: %v\n输出:\n%s", err, string(out)), nil
+	}
+	return string(out), nil
+}
+
 // NewBuiltins returns the default built-in tool set.
 func NewBuiltins() []tool.Tool {
 	return []tool.Tool{
 		timeTool{},
 		calcTool{},
 		httpTool{},
+		webSearchTool{},
+		webFetchTool{},
+		shellExecTool{},
 		memorySearchTool{},
 		conversationSearchTool{},
 	}

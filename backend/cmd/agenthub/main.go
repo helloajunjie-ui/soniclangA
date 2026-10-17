@@ -5,12 +5,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/png"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/agenthub/agent-proxy/internal/audit"
@@ -23,6 +29,7 @@ import (
 	"github.com/agenthub/agent-proxy/internal/keyvault"
 	"github.com/agenthub/agent-proxy/internal/knowledge"
 	"github.com/agenthub/agent-proxy/internal/knowledge/ingest"
+	"github.com/agenthub/agent-proxy/internal/logx"
 	"github.com/agenthub/agent-proxy/internal/mcp"
 	"github.com/agenthub/agent-proxy/internal/memory"
 	"github.com/agenthub/agent-proxy/internal/memory/consolidate"
@@ -41,6 +48,7 @@ import (
 	"github.com/agenthub/agent-proxy/internal/tool/builtin"
 	"github.com/agenthub/agent-proxy/internal/tool/registry"
 	"github.com/agenthub/agent-proxy/internal/tool/sandbox"
+	"github.com/getlantern/systray"
 )
 
 func main() {
@@ -54,6 +62,13 @@ func main() {
 	for _, w := range cfg.Audit() {
 		log.Printf("config warning: %s", w)
 	}
+
+	// Process-wide runtime log (HTTP, tools, external API calls, errors).
+	// AGENTHUB_DEBUG=1 enables DEBUG-level output.
+	appLog := logx.Init(filepath.Join(cfg.DataDir, "logs", "agenthub.log"),
+		os.Getenv("AGENTHUB_DEBUG") == "1")
+	appLog.Infof("AgentHub 启动中，数据目录 %s，日志目录 %s", cfg.DataDir, filepath.Join(cfg.DataDir, "logs"))
+	defer appLog.Close()
 
 	vault, err := keyvault.New(cfg.DataDir)
 	if err != nil {
@@ -291,14 +306,89 @@ func main() {
 		}
 	}()
 
+	// System tray: show that the service is running, right-click to open UI or quit.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	var exitOnce sync.Once
+	exited := false
+	onExit := func() {
+		exitOnce.Do(func() {
+			log.Println("正在关闭...")
+			_ = srv.Shutdown(context.Background())
+			mcpMgr.StopAll()
+			mods.StopAll()
+			storage.CloseShared()
+			exited = true
+		})
+	}
+
+	onReady := func() {
+		// Generate a simple 32x32 blue circle icon.
+		icon := generateTrayIcon()
+		systray.SetIcon(icon)
+		systray.SetTitle("AgentHub")
+		systray.SetTooltip("AgentHub 智能体代理")
+		mOpen := systray.AddMenuItem("打开主界面", "在浏览器中打开")
+		systray.AddSeparator()
+		mQuit := systray.AddMenuItem("退出", "停止服务")
+		go func() {
+			for range mOpen.ClickedCh {
+				exec.Command("cmd", "/c", "start", "http://"+cfg.Addr).Start()
+			}
+		}()
+		go func() {
+			<-mQuit.ClickedCh
+			systray.Quit()
+		}()
+	}
+
+	systray.Run(onReady, onExit)
+	// Two ways out of systray.Run, and they need opposite handling:
+	//   - the user chose 退出: onExit already ran, so the process must actually end.
+	//     Waiting on a signal here used to leave a headless zombie (no tray, no
+	//     window, closed database) that had to be killed by hand;
+	//   - the tray could not start (no interactive session, access denied): Run
+	//     returns without calling onExit, and the service must keep serving, so
+	//     fall through and wait for a signal like before.
+	if exited {
+		return
+	}
 	<-stop
-	log.Println("正在关闭...")
-	_ = srv.Shutdown(context.Background())
-	mcpMgr.StopAll()
-	mods.StopAll()
-	storage.CloseShared()
+	onExit()
+}
+
+// generateTrayIcon draws a 32x32 blue circle with a white "A" shape.
+func generateTrayIcon() []byte {
+	const size = 32
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	// Fill with blue circle.
+	center := size / 2
+	radius := size/2 - 2
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			dx, dy := x-center, y-center
+			if dx*dx+dy*dy <= radius*radius {
+				img.Set(x, y, color.RGBA{64, 130, 247, 255})
+			}
+		}
+	}
+	// Simple white "A" shape (triangle).
+	for y := 8; y < 24; y++ {
+		half := (y - 8) / 2
+		for x := center - half; x <= center+half; x++ {
+			if x >= 0 && x < size && y >= 0 && y < size {
+				img.Set(x, y, color.White)
+			}
+		}
+	}
+	// Crossbar of A.
+	for x := center - 4; x <= center+4; x++ {
+		img.Set(x, 18, color.White)
+	}
+	var buf bytes.Buffer
+	png.Encode(&buf, img)
+	return buf.Bytes()
 }
 
 // noopModule represents a subsystem that is wired directly into the runtime

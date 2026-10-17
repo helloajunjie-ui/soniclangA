@@ -94,10 +94,17 @@ func (idx *index) rebuild() {
 }
 
 // SearchBM25 runs keyword search over the BM25 index.
+//
+// The read lock is held for the whole search, not just the map lookup: Refresh
+// and Remove rewrite the index in place under the write lock (records, ids, inv),
+// and toHits reads those fields. Dropping the lock early let a chat turn's recall
+// run concurrently with an ingest or consolidation job's Refresh — Go treats a
+// concurrent map read and map write as unrecoverable, so one overlap killed the
+// process. Searches are short; serialising them against a rare rebuild is cheap.
 func (s *Service) SearchBM25(ns, query string, topK int) []Hit {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	idx := s.indexes[ns]
-	s.mu.RUnlock()
 	if idx == nil {
 		return nil
 	}
@@ -109,11 +116,12 @@ func (s *Service) SearchBM25(ns, query string, topK int) []Hit {
 	return s.toHits(idx, list)
 }
 
-// SearchVector runs semantic search over the embedding index.
+// SearchVector runs semantic search over the embedding index (same locking
+// rule as SearchBM25: the index it reads is mutated in place by writers).
 func (s *Service) SearchVector(ns string, queryEmbedding []float32, topK int) []Hit {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	idx := s.indexes[ns]
-	s.mu.RUnlock()
 	if idx == nil {
 		return nil
 	}

@@ -122,4 +122,9 @@ var actionWords = []string{
 	"调研", "分析", "执行", "批量", "整理", "生成报告", "修复", "部署",
 	"计划", "任务", "步骤", "对比", "总结成", "写一份", "做一个", "实现",
 	"调研一下", "帮我做", "自动",
+	// Multi-step / tool-driving verbs: a request naming several concrete
+	// actions should be routed to task mode so the plan strip is surfaced
+	// and the user sees step-by-step progress instead of an opaque wait.
+	"抓取", "汇总", "计算", "查询", "搜索", "简报", "报告", "盘点", "梳理",
+	"研究", "设计", "创建", "生成", "依次", "分别", "列出", "检查",
 }

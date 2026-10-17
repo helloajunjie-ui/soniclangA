@@ -10,8 +10,20 @@ import (
 )
 
 func TestAssembleEmpty(t *testing.T) {
-	if got := Assemble(Context{}); got != "" {
-		t.Fatalf("empty context should assemble to empty, got %q", got)
+	got := Assemble(Context{})
+	// An empty context still carries the always-on infrastructure blocks:
+	// the real current time and the built-in tool guidance.
+	if !strings.Contains(got, "当前时间") {
+		t.Fatalf("missing current-time block, got %q", got)
+	}
+	if !strings.Contains(got, "<tool_guidance>") {
+		t.Fatalf("missing tool-guidance block, got %q", got)
+	}
+	// But no persona / skills / memory blocks should appear from nothing.
+	for _, tag := range []string{"<persona>", "<skills>", "<memory_guidance>", "<methodology>"} {
+		if strings.Contains(got, tag) {
+			t.Fatalf("empty context should not render %s, got %q", tag, got)
+		}
 	}
 }
 

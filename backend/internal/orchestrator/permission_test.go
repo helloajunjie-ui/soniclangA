@@ -156,10 +156,11 @@ func TestFlowToolsRunAtTheDefaultTier(t *testing.T) {
 	for _, name := range []string{
 		envprobe.ToolName,
 		brief.ToolCreate, brief.ToolAppend, brief.ToolRead, brief.ToolList,
+		// Read-only network tools fetch information and never mutate state.
+		"http_fetch", "web_search", "web_fetch", "get_time",
 	} {
 		allowed(t, g, name)
 	}
 	// The loosening is specific, not a general "ask now allows everything".
 	blocked(t, g, "write_file")
-	blocked(t, g, "http_fetch")
 }

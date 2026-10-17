@@ -139,9 +139,9 @@ type VideoGenerator interface {
 
 // VideoResult is the outcome of a video generation request.
 type VideoResult struct {
-	URL   string `json:"url,omitempty"`
-	Task  string `json:"taskId,omitempty"`
-	Model string `json:"model"`
+	URL    string `json:"url,omitempty"`
+	Task   string `json:"taskId,omitempty"`
+	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
 }
 
@@ -753,8 +753,13 @@ func (s *Service) GetRuntime(id string) (Runtime, error) {
 	// read inside the same critical section — reading it after unlocking races
 	// with a concurrent provider edit and can crash the process.
 	var hl *health.Health
+	// Clone here, still under the lock: AddKey appends to p.Keys and Test assigns
+	// p.Models under the write lock, so cloning after the unlock raced with them
+	// (a torn slice header is not recoverable).
+	var clone *Provider
 	if ok {
 		hl = s.health[p.ID]
+		clone = cloneProvider(p)
 	}
 	s.mu.RUnlock()
 	if !ok {
@@ -769,7 +774,7 @@ func (s *Service) GetRuntime(id string) (Runtime, error) {
 	// The adapter keeps its own copy of the entity: it writes cooldown state
 	// into Keys on every failure, and mutating the shared cache from a
 	// streaming goroutine would race with the service's own writes.
-	a = buildAdapter(cloneProvider(p), s.vault, hl)
+	a = buildAdapter(clone, s.vault, hl)
 	s.adaptersMu.Lock()
 	s.adapters[id] = a
 	s.adaptersMu.Unlock()

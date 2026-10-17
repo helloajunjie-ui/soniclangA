@@ -227,16 +227,26 @@ func (a *anthropicAdapter) ChatStream(ctx context.Context, messages []Message, o
 	ch := make(chan StreamChunk)
 	go func() {
 		defer close(ch)
-		var lastErr error
+		var lastErr, firstErr error
 		tries := len(a.entity.Keys) + 1
 		for attempt := 0; attempt < tries; attempt++ {
 			ref, err := a.selectKey()
 			if err != nil {
-				lastErr = err
+				// Report the first real failure, not the retry bookkeeping: with
+				// one key the failed attempt benches it, so this branch says "all
+				// keys in cooldown" and hides the upstream status that caused it.
+				if firstErr != nil {
+					lastErr = firstErr
+				} else {
+					lastErr = err
+				}
 				break
 			}
 			secret, err := a.secret(ref)
 			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
 				lastErr = err
 				a.markCooldown(ref)
 				continue
@@ -244,6 +254,9 @@ func (a *anthropicAdapter) ChatStream(ctx context.Context, messages []Message, o
 			ok, streamErr := a.streamOnce(ctx, ch, secret, payload)
 			if ok {
 				return
+			}
+			if firstErr == nil {
+				firstErr = streamErr
 			}
 			lastErr = streamErr
 			a.markCooldown(ref)

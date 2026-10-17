@@ -5,7 +5,9 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"time"
 
+	"github.com/agenthub/agent-proxy/internal/logx"
 	"github.com/agenthub/agent-proxy/internal/provider"
 	"github.com/agenthub/agent-proxy/internal/tool/registry"
 )
@@ -41,16 +43,21 @@ func Execute(ctx context.Context, reg *registry.Registry, calls []provider.ToolC
 			if err := gate(c.Name, args); err != nil {
 				r.Err = err.Error()
 				r.Result = "error: 需要用户授权 — " + err.Error()
+				logx.Warnf("tool %s 被权限拦截: %v", c.Name, err)
 				out = append(out, r)
 				continue
 			}
 		}
+		start := time.Now()
 		res, err := reg.Execute(ctx, c.Name, args)
+		dur := time.Since(start).Round(time.Millisecond)
 		if err != nil {
 			r.Err = err.Error()
 			r.Result = "error: " + err.Error()
+			logx.Warnf("tool %s 失败 (%s): %v", c.Name, dur, err)
 		} else {
 			r.Result = res
+			logx.Infof("tool %s 完成 (%s), 输出 %d 字符", c.Name, dur, len(res))
 		}
 		out = append(out, r)
 	}

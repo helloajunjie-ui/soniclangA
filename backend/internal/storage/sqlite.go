@@ -36,7 +36,13 @@ func sharedDB(path string) (*sql.DB, error) {
 			dbErr = err
 			return
 		}
-		db, err := sql.Open("sqlite", path)
+		// Per-connection settings belong in the DSN: database/sql hands each
+		// statement to an arbitrary pooled connection and SQLite's busy handler is
+		// per-connection, so the one-shot PRAGMAs in initSchema only configured one
+		// of the four — a write landing on a fresh connection returned
+		// SQLITE_BUSY ("database is locked") instead of waiting.
+		dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+		db, err := sql.Open("sqlite", dsn)
 		if err != nil {
 			dbErr = err
 			return
@@ -56,14 +62,19 @@ func sharedDB(path string) (*sql.DB, error) {
 		}
 		dbRef = db
 	})
+	// sync.Once never runs again, so after CloseShared this returns (nil, nil) —
+	// and every caller treats a nil db as usable. That turned "the shared handle
+	// is gone" into a nil-pointer panic somewhere further down instead of an
+	// error at the call site. (resetSharedForTest is what prepares a reopen.)
+	if dbRef == nil && dbErr == nil {
+		return nil, fmt.Errorf("storage: shared sqlite handle is closed")
+	}
 	return dbRef, dbErr
 }
 
 func initSchema(db *sql.DB) error {
 	stmts := []string{
-		`PRAGMA journal_mode=WAL`,
-		`PRAGMA busy_timeout=5000`,
-		`PRAGMA synchronous=NORMAL`,
+
 		`CREATE TABLE IF NOT EXISTS documents (
 			ns         TEXT NOT NULL,
 			id         TEXT NOT NULL,
@@ -79,6 +90,7 @@ func initSchema(db *sql.DB) error {
 			PRIMARY KEY (ns, id, seq)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_streams_ns_id ON streams(ns, id, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_documents_ns_updated ON documents(ns, updated_at)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -229,6 +241,38 @@ func (s *SQLiteStore) Exists(id string) bool {
 	var n int
 	err := s.db.QueryRow(`SELECT 1 FROM documents WHERE ns=? AND id=?`, s.ns, id).Scan(&n)
 	return err == nil
+}
+
+// ReplaceJSONL rewrites the whole stream in one transaction: delete every row for
+// the id, then re-insert each line with an incremental seq.
+//
+// The transaction matters. As N+1 autocommit statements, a failure (or a shutdown)
+// after the DELETE left the conversation permanently truncated to whatever prefix
+// had been inserted — editing one message could make history disappear on reload.
+func (s *SQLiteStore) ReplaceJSONL(id string, lines [][]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
+	if _, err := tx.Exec(`DELETE FROM streams WHERE ns=? AND id=?`, s.ns, id); err != nil {
+		return err
+	}
+	for i, l := range lines {
+		line := l
+		if len(line) == 0 || line[len(line)-1] != '\n' {
+			line = append(append([]byte{}, line...), '\n')
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO streams(ns, id, seq, line) VALUES(?, ?, ?, ?)`,
+			s.ns, id, i+1, line,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) Dir() string { return s.auxDir }

@@ -375,6 +375,100 @@ func (s *Service) StreamMessages(id string, sinceSeq int64) (<-chan Message, err
 	return nil, nil
 }
 
+// TrimMessages deletes the message msgID and everything after it, then fixes
+// the message count. This is the primitive behind edit / delete / regenerate:
+// whatever the user pointed at becomes the new tail of the conversation, so the
+// turn can be redone without leaving orphaned messages behind.
+func (s *Service) TrimMessages(id, msgID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs, err := s.Messages(id)
+	if err != nil {
+		return err
+	}
+	targetSeq := int64(0)
+	for _, m := range msgs {
+		if m.ID == msgID {
+			targetSeq = m.Seq
+			break
+		}
+	}
+	if targetSeq == 0 {
+		return storage.ErrNotFound
+	}
+	keep := make([][]byte, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Seq >= targetSeq {
+			continue
+		}
+		if b, err := json.Marshal(m); err == nil {
+			keep = append(keep, b)
+		}
+	}
+	if err := s.store.ReplaceJSONL(id, keep); err != nil {
+		return err
+	}
+	var c Conversation
+	if err := s.store.Load(id, &c); err != nil {
+		return err
+	}
+	c.MessageCount = len(keep)
+	c.UpdatedAt = time.Now().UnixMilli()
+	return s.store.Save(id, c)
+}
+
+// UpdateMessage replaces one message's content in place (editing a user turn
+// before it is re-sent).
+func (s *Service) UpdateMessage(id, msgID, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs, err := s.Messages(id)
+	if err != nil {
+		return err
+	}
+	lines := make([][]byte, 0, len(msgs))
+	found := false
+	for _, m := range msgs {
+		if m.ID == msgID {
+			m.Content = content
+			found = true
+		}
+		if b, err := json.Marshal(m); err == nil {
+			lines = append(lines, b)
+		}
+	}
+	if !found {
+		return storage.ErrNotFound
+	}
+	return s.store.ReplaceJSONL(id, lines)
+}
+
+// AppendToMessage grows an existing assistant message in place (used by
+// "continue": the reply lengthens instead of opening a new assistant turn).
+func (s *Service) AppendToMessage(id, msgID, delta string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs, err := s.Messages(id)
+	if err != nil {
+		return err
+	}
+	lines := make([][]byte, 0, len(msgs))
+	found := false
+	for _, m := range msgs {
+		if m.ID == msgID {
+			m.Content += delta
+			found = true
+		}
+		if b, err := json.Marshal(m); err == nil {
+			lines = append(lines, b)
+		}
+	}
+	if !found {
+		return storage.ErrNotFound
+	}
+	return s.store.ReplaceJSONL(id, lines)
+}
+
 // SetMode switches the session mode.
 func (s *Service) SetMode(id string, mode Mode) error {
 	return s.UpdateMeta(id, MetaPatch{Mode: &mode})

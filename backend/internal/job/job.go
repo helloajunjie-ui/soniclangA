@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,10 @@ type Worker interface {
 	Run(ctx context.Context, payload []byte) error
 }
 
+// statusDir holds the per-job status sidecars, kept apart from the job documents
+// so store.IDs() (which enumerates the job directory) does not report them as jobs.
+const statusDir = "status"
+
 // Service implements JobQueue with an in-process worker pool.
 type Service struct {
 	store       storage.Store
@@ -92,15 +97,41 @@ func New(store storage.Store) *Service {
 
 func (s *Service) load() {
 	ids, err := s.store.IDs()
+	if err == nil {
+		for _, id := range ids {
+			var j Job
+			if err := s.store.Load(id, &j); err == nil {
+				s.jobs[id] = &j
+				s.statuses[id] = &JobStatus{ID: id, Type: j.Type, Status: "pending", CreatedAt: j.CreatedAt, UpdatedAt: j.CreatedAt}
+			}
+		}
+	}
+	// Restore the persisted status sidecars. Without this every job from a
+	// previous run was reported as "pending" forever, so the UI polled a status
+	// no worker would ever change.
+	dir := filepath.Join(s.store.Dir(), statusDir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	for _, id := range ids {
-		var j Job
-		if err := s.store.Load(id, &j); err == nil {
-			s.jobs[id] = &j
-			s.statuses[id] = &JobStatus{ID: id, Type: j.Type, Status: "pending", CreatedAt: j.CreatedAt, UpdatedAt: j.CreatedAt}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
 		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var st JobStatus
+		if json.Unmarshal(b, &st) != nil || st.ID == "" {
+			continue
+		}
+		// A job caught mid-run by the restart is not still running.
+		if st.Status == "running" {
+			st.Status = "failed"
+			st.Error = "服务重启，任务中断"
+		}
+		s.statuses[st.ID] = &st
 	}
 }
 
@@ -198,7 +229,9 @@ func (s *Service) Subscribe(jobID string) (<-chan Progress, error) {
 	return ch, nil
 }
 
-// Cancel requests cancellation of a job.
+// Cancel requests cancellation of a job. It is idempotent: the UI's cancel
+// button can be pressed twice (or the request retried), and closing an
+// already-closed channel panics.
 func (s *Service) Cancel(jobID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -208,6 +241,9 @@ func (s *Service) Cancel(jobID string) error {
 	}
 	if c, ok := s.cancels[jobID]; ok {
 		close(c)
+		// Drop the entry so a second Cancel cannot close it again. The entry is
+		// recreated by Submit, and a cancelled job is never resubmitted.
+		delete(s.cancels, jobID)
 	}
 	st.Status = "cancelled"
 	st.UpdatedAt = time.Now().UnixMilli()
@@ -225,13 +261,29 @@ func (s *Service) process(jobID string) {
 	job := s.jobs[jobID]
 	st := s.statuses[jobID]
 	cancel := s.cancels[jobID]
+	status := ""
+	var w Worker
+	if job != nil {
+		if st != nil {
+			status = st.Status
+		}
+		// Read the worker table under the same lock RegisterWorker writes it
+		// with; a runtime registration used to race with the pool.
+		w = s.workers[job.Type]
+	}
 	s.mu.RUnlock()
 	if job == nil || st == nil {
 		return
 	}
+	// A job cancelled while it was still queued must not start. Without this the
+	// worker picks it up anyway and the cancel only changed a status string the
+	// next update overwrites — the user cancels an upload and watches it finish.
+	if status == "cancelled" {
+		s.persistStatus(jobID)
+		return
+	}
 	s.update(jobID, "running", 0, "")
-	w, ok := s.workers[job.Type]
-	if !ok {
+	if w == nil {
 		s.update(jobID, "failed", 0, "no worker registered for type "+job.Type)
 		s.persistStatus(jobID)
 		return
@@ -247,11 +299,26 @@ func (s *Service) process(jobID string) {
 	}()
 	err := w.Run(ctx, job.Payload)
 	if err != nil {
-		s.update(jobID, "failed", 0, err.Error())
+		// A cancel makes the worker return a context error; reporting that as
+		// "failed" tells the user their cancel did not work.
+		if s.cancelled(jobID) {
+			s.update(jobID, "cancelled", 0, "已取消")
+		} else {
+			s.update(jobID, "failed", 0, err.Error())
+		}
 	} else {
 		s.update(jobID, "done", 100, "")
 	}
 	s.persistStatus(jobID)
+}
+
+// cancelled reports whether the job is marked cancelled. Read under the lock:
+// the status fields are shared pointers written by update/ReportProgress.
+func (s *Service) cancelled(jobID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := s.statuses[jobID]
+	return st != nil && st.Status == "cancelled"
 }
 
 func (s *Service) update(jobID, status string, progress int, msg string) {
@@ -278,14 +345,28 @@ func (s *Service) persist(job *Job) error {
 }
 
 func (s *Service) persistStatus(jobID string) {
+	// Copy the status under the read lock and marshal the copy: Cancel, update and
+	// ReportProgress rewrite the shared struct under the write lock, so marshalling
+	// it unlocked raced with them and could write a torn file.
 	s.mu.RLock()
-	st := s.statuses[jobID]
+	st, ok := s.statuses[jobID]
+	var snap JobStatus
+	if ok {
+		snap = *st
+	}
 	s.mu.RUnlock()
-	if st == nil {
+	if !ok {
 		return
 	}
-	data, _ := json.Marshal(st)
-	p := filepath.Join(s.store.Dir(), jobID+".status.json")
+	data, _ := json.Marshal(snap)
+	// Status lives in its own subdirectory. Next to the job documents it was
+	// enumerated by store.IDs() as a job named "<id>.status", so every finished
+	// job came back as a phantom pending job after a restart.
+	dir := filepath.Join(s.store.Dir(), statusDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	p := filepath.Join(dir, jobID+".json")
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return

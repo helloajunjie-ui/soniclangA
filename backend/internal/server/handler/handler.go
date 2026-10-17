@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -73,7 +72,7 @@ type Handler struct {
 	MCP     *mcp.Manager
 
 	static http.Handler
-	log *logx.Logger
+	log    *logx.Logger
 }
 
 // New constructs a Handler and a static file server for the embedded dist.
@@ -87,7 +86,7 @@ func New(cfg *config.Config, prov *provider.Service, roles *role.Service, convs 
 		Knowledge: know, Memory: mem, Method: meth, Control: ctrl, REA: reaSvc,
 		Tools: tools, Jobs: jobs, Ingest: ing, Orch: orch,
 		Extractor: ex, Consolidate: cons, static: static,
-		log: logx.New(filepath.Join(cfg.DataDir, "logs", "agenthub.log")),
+		log: logx.Default(),
 	}
 }
 
@@ -112,6 +111,16 @@ func (s *statusWriter) Write(b []byte) (int, error) {
 		s.wrote = true
 	}
 	return s.ResponseWriter.Write(b)
+}
+
+// Flush forwards to the underlying writer when it is also an http.Flusher, so
+// SSE streaming keeps working behind the logging wrapper. Without it the
+// wrapper fails the w.(http.Flusher) assertion and chat SSE returns 500
+// "streaming unsupported".
+func (s *statusWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // ---- middleware + dispatch ----
@@ -181,6 +190,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.json(w, 200, map[string]interface{}{"status": "ok", "version": "M4"})
 	case strings.HasPrefix(p, "/api/v1/debug"):
 		h.debug(w, r, p)
+	case p == "/api/v1/logs":
+		h.logs(w, r)
 	case strings.HasPrefix(p, "/api/v1/providers"):
 		h.providers(w, r, p)
 	case strings.HasPrefix(p, "/api/v1/roles"):
@@ -301,8 +312,23 @@ func (h *Handler) json(w http.ResponseWriter, code int, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// maxJSONBody bounds the bodies read by decode/decodeOptional. io.ReadAll used to
+// buffer whatever arrived, so a stray multi-gigabyte POST took the process down
+// with it. File uploads do not come through here (they go through multipart,
+// which has its own limit), so this only has to fit JSON payloads — 32 MB is
+// roughly three orders of magnitude above the largest legitimate one.
+const maxJSONBody = 32 << 20
+
+// readBody reads a request body with that cap applied.
+func readBody(r *http.Request) ([]byte, error) {
+	return io.ReadAll(http.MaxBytesReader(nil, r.Body, maxJSONBody))
+}
+
 func (h *Handler) decode(r *http.Request, v interface{}) error {
-	b, _ := io.ReadAll(r.Body)
+	b, err := readBody(r)
+	if err != nil {
+		return err
+	}
 	if len(b) == 0 {
 		return fmt.Errorf("empty body")
 	}
@@ -313,7 +339,10 @@ func (h *Handler) decode(r *http.Request, v interface{}) error {
 // parameters are all optional use it so that a bare POST (curl, a UI switch)
 // is not rejected as "bad body".
 func (h *Handler) decodeOptional(r *http.Request, v interface{}) (bool, error) {
-	b, _ := io.ReadAll(r.Body)
+	b, err := readBody(r)
+	if err != nil {
+		return false, err
+	}
 	if len(bytes.TrimSpace(b)) == 0 {
 		return false, nil
 	}
@@ -744,6 +773,35 @@ func (h *Handler) conversations(w http.ResponseWriter, r *http.Request, p string
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	case strings.Contains(p, "/messages/"):
+		// /conversations/{id}/messages/{mid} — bubble operations
+		mid := strings.TrimPrefix(p, "/api/v1/conversations/"+id+"/messages/")
+		switch r.Method {
+		case http.MethodPut:
+			var body struct {
+				Content *string `json:"content"`
+			}
+			// A malformed or content-less body used to decode to "" and blank the
+			// bubble, then answer {"ok":true} — silent content loss reported as
+			// success.
+			if err := h.decode(r, &body); err != nil || body.Content == nil {
+				http.Error(w, "content required", http.StatusBadRequest)
+				return
+			}
+			if err := h.Convs.UpdateMessage(id, mid, *body.Content); err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			h.json(w, 200, map[string]interface{}{"ok": true})
+		case http.MethodDelete:
+			if err := h.Convs.TrimMessages(id, mid); err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			h.json(w, 200, map[string]interface{}{"ok": true})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	case strings.HasSuffix(p, "/export"):
 		data, err := h.Convs.Export(id, r.URL.Query().Get("format"))
 		if err != nil {
@@ -923,6 +981,26 @@ func (h *Handler) skills(w http.ResponseWriter, r *http.Request, p string) {
 
 // debug exposes read-only introspection endpoints used to diagnose prompt
 // assembly. It never mutates state.
+// logs returns the most recent in-memory runtime log entries so the UI can
+// diagnose failures without opening files on disk. Query params: level
+// (debug/info/warn/error, default info), n (count, default 300, cap 1000).
+func (h *Handler) logs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	level := r.URL.Query().Get("level")
+	n := 300
+	if v := r.URL.Query().Get("n"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	h.json(w, 200, map[string]interface{}{
+		"entries": logx.Default().Recent(level, n),
+	})
+}
+
 func (h *Handler) debug(w http.ResponseWriter, r *http.Request, p string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1232,12 +1310,21 @@ func (h *Handler) uploadDocument(w http.ResponseWriter, r *http.Request, collID 
 			http.Error(w, "bad multipart: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		var f multipart.File
 		if fh, ok := r.MultipartForm.File["file"]; ok && len(fh) > 0 {
 			name = fh[0].Filename
-			f, _ = fh[0].Open()
-			defer f.Close()
-			data, _ = io.ReadAll(f)
+			f, err := fh[0].Open()
+			if err != nil {
+				http.Error(w, "cannot read upload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			// Check the read error too: a truncated part used to become an empty
+			// document that was still queued for ingestion as if it were fine.
+			data, err = io.ReadAll(f)
+			f.Close()
+			if err != nil {
+				http.Error(w, "cannot read upload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		} else {
 			http.Error(w, "missing 'file' part", http.StatusBadRequest)
 			return
@@ -1307,7 +1394,15 @@ func (h *Handler) knowledgeSearch(w http.ResponseWriter, r *http.Request) {
 			Query         string   `json:"query"`
 			TopK          int      `json:"topK"`
 		}
-		if err := h.decode(r, &body); err == nil {
+		// A malformed body must be a 400: ignoring the decode error left ids and q
+		// at their zero values, which then expanded to *every* collection and
+		// returned unrelated chunks with a 200.
+		sent, err := h.decodeOptional(r, &body)
+		if err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if sent {
 			ids = body.CollectionIDs
 			q = body.Query
 			if body.TopK > 0 {
@@ -1511,14 +1606,29 @@ func (h *Handler) memoriesPersona(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.json(w, 200, map[string]string{"content": h.Memory.Persona()})
 	case http.MethodPut:
+		// Pointers keep "absent" and "explicitly empty" distinguishable: the UI
+		// posts {markdown} while the documented field is {content}, so decoding
+		// into a plain string read a zero value and wiped the L3 profile on every
+		// save, answering 200.
 		var body struct {
-			Content string `json:"content"`
+			Content  *string `json:"content"`
+			Markdown *string `json:"markdown"`
 		}
 		if err := h.decode(r, &body); err != nil {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
-		if err := h.Memory.SetPersona(body.Content); err != nil {
+		var text string
+		switch {
+		case body.Content != nil:
+			text = *body.Content
+		case body.Markdown != nil:
+			text = *body.Markdown
+		default:
+			http.Error(w, "content or markdown required", http.StatusBadRequest)
+			return
+		}
+		if err := h.Memory.SetPersona(text); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1972,13 +2082,18 @@ func (h *Handler) chatSSE(w http.ResponseWriter, r *http.Request, convID string)
 		Model     string `json:"model"`
 		Mode      string `json:"mode"`
 		Reasoning string `json:"reasoning"`
+		Action    string `json:"action"`
+		Target    string `json:"target"`
 	}
 	_ = h.decode(r, &body)
 	msg := body.Message
 	if msg == "" {
 		msg = body.Content
 	}
-	if msg == "" {
+	// Bubble-edit actions (regenerate / continue) reuse the existing tail and
+	// do not need a fresh user message — the orchestrator pulls the prompt from
+	// history (regenerate) or appends an invisible "keep writing" cue (continue).
+	if msg == "" && body.Action == "" {
 		http.Error(w, "empty message", http.StatusBadRequest)
 		return
 	}
@@ -1989,6 +2104,8 @@ func (h *Handler) chatSSE(w http.ResponseWriter, r *http.Request, convID string)
 		Model:          body.Model,
 		Mode:           body.Mode,
 		Reasoning:      body.Reasoning,
+		Action:         body.Action,
+		TargetID:       body.Target,
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1999,6 +2116,12 @@ func (h *Handler) chatSSE(w http.ResponseWriter, r *http.Request, convID string)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	// Send the headers immediately. Nothing used to be written until the
+	// orchestrator produced its first event, so the browser's fetch() stayed
+	// pending for the entire first-token latency and a slow turn was
+	// indistinguishable from a stream that never opened.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	ch, err := h.Orch.Chat(r.Context(), in)
 	if err != nil {

@@ -7,6 +7,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,9 @@ type Store interface {
 	AppendRaw(id string, line []byte) error
 	// ReadJSONL returns all raw lines of the stream id, in append order.
 	ReadJSONL(id string) ([][]byte, error)
+	// ReplaceJSONL rewrites the whole stream id atomically from the given raw
+	// lines. Used by the message-editing operations (edit / delete / trim).
+	ReplaceJSONL(id string, lines [][]byte) error
 	// Exists reports whether the document id is present.
 	Exists(id string) bool
 	// Dir returns the directory used for auxiliary files of this namespace.
@@ -162,6 +166,25 @@ func (s *JSONStore) ReadJSONL(id string) ([][]byte, error) {
 func (s *JSONStore) Exists(id string) bool {
 	_, err := os.Stat(s.jsonPath(id))
 	return err == nil
+}
+
+// ReplaceJSONL rewrites the stream atomically (tmp + rename). Lines that do
+// not end in '\n' get one appended so the file stays parseable.
+func (s *JSONStore) ReplaceJSONL(id string, lines [][]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var buf bytes.Buffer
+	for _, l := range lines {
+		buf.Write(l)
+		if len(l) == 0 || l[len(l)-1] != '\n' {
+			buf.WriteByte('\n')
+		}
+	}
+	tmp := s.jsonlPath(id) + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.jsonlPath(id))
 }
 
 func (s *JSONStore) Dir() string { return s.dir }
