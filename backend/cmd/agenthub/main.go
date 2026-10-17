@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/agenthub/agent-proxy/internal/audit"
 	"github.com/agenthub/agent-proxy/internal/brief"
@@ -298,6 +299,13 @@ func main() {
 		}
 	}
 	srv := server.New(h, cfg.Addr)
+
+	// Memory consolidation used to have exactly one trigger: the button in the UI.
+	// "自动巩固" therefore never ran — L1 kept accumulating while the L2 scenes and
+	// the L3 persona stayed frozen. Check every half hour and only act once 20 new
+	// L1 facts have appeared since the last completed run (each run costs one or
+	// two LLM calls, so the threshold is what bounds the spend).
+	go h.AutoConsolidate(30*time.Minute, 20)
 
 	go func() {
 		log.Printf("AgentHub 已启动: http://%s", cfg.Addr)

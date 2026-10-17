@@ -134,18 +134,45 @@ type ModuleGate interface {
 // toolSpecs returns the tool schemas the model may call, honouring module
 // switches. A disabled tool must be invisible to the model, otherwise it would
 // still emit calls the loop cannot satisfy.
-func (o *Orchestrator) toolSpecs() []provider.ToolSpec {
+// toolSpecs returns the tool schemas the model may call, honouring module
+// switches and the role's own tool selection.
+//
+// role.Tools is what the role editor shows as a checklist, so it has to decide
+// something: a role that names its tools gets exactly those, and an empty list
+// means "everything the modules allow" (every built-in role relies on that, so
+// nothing changes for them). Before this, the checklist was decorative — a role
+// configured with only `calculator` still advertised shell_exec and the whole
+// control_* family.
+func (o *Orchestrator) toolSpecs(r *role.Role) []provider.ToolSpec {
 	specs := o.Tools.Schemas()
-	if o.Modules == nil {
-		return specs
+	allowed := map[string]bool{}
+	if r != nil {
+		for _, name := range r.Tools {
+			allowed[name] = true
+		}
 	}
 	out := make([]provider.ToolSpec, 0, len(specs))
 	for _, s := range specs {
-		if o.Modules.IsEnabled("tool." + s.Name) {
-			out = append(out, s)
+		if o.Modules != nil && !o.Modules.IsEnabled("tool."+s.Name) {
+			continue
 		}
+		if len(allowed) > 0 && !allowed[s.Name] {
+			continue
+		}
+		out = append(out, s)
 	}
 	return out
+}
+
+// toolNames is the same set as toolSpecs, as plain names, for the prompt's tool
+// inventory (the model must not be told about a tool it was not given).
+func (o *Orchestrator) toolNames(r *role.Role) []string {
+	specs := o.toolSpecs(r)
+	names := make([]string, 0, len(specs))
+	for _, s := range specs {
+		names = append(names, s.Name)
+	}
+	return names
 }
 
 func (o *Orchestrator) moduleEnabled(id string) bool {
@@ -276,7 +303,7 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 				cls = rt
 			}
 		}
-		d := router.ClassifyWith(ctx, cls, in.Message, o.toolSpecs(), opts)
+		d := router.ClassifyWith(ctx, cls, in.Message, o.toolSpecs(role), opts)
 		emit("route", map[string]interface{}{
 			"mode": d.Mode, "confidence": d.Confidence, "reason": d.Reason, "source": d.Source,
 		})
@@ -410,7 +437,7 @@ func (o *Orchestrator) run(ctx context.Context, ch chan Event, in ChatInput) {
 			Temperature:     o.temperature(role, in),
 			MaxTokens:       o.maxTokens(role, in),
 			TopP:            role.TopP,
-			Tools:           o.toolSpecs(),
+			Tools:           o.toolSpecs(role),
 			Stream:          true,
 			ReasoningEffort: in.Reasoning,
 		}
@@ -679,6 +706,7 @@ func (o *Orchestrator) buildMessages(conv *conversation.Conversation, role *role
 		Skills:         o.resolveSkills(role),
 		Methodologies:  o.resolveMethodologies(role, query),
 		MemoryGuidance: guidance,
+		ToolNames:      o.toolNames(role),
 		Vars:           conv.Vars,
 	})
 	if sys != "" {

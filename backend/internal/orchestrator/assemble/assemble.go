@@ -23,6 +23,9 @@ type Context struct {
 	Skills         []*skill.Skill
 	Methodologies  []methodology.MatchHit
 	MemoryGuidance string
+	// ToolNames is the set of tools this turn actually offers. The guidance block
+	// is filtered by it, and omitted entirely when empty.
+	ToolNames []string
 	// Vars holds the values for the role's {{template}} variables.
 	Vars map[string]string
 }
@@ -44,7 +47,7 @@ func Assemble(c Context) string {
 	if mb := MethodologyBlock(c.Methodologies); mb != "" {
 		parts = append(parts, mb)
 	}
-	if tb := ToolGuidanceBlock(); tb != "" {
+	if tb := ToolGuidanceBlock(c.ToolNames); tb != "" {
 		parts = append(parts, tb)
 	}
 	if sb := SkillBlock(c.Skills); sb != "" {
@@ -158,8 +161,46 @@ func MethodologyBlock(hits []methodology.MatchHit) string {
 // exist, when to reach for each one, and how to recover when a tool fails.
 // Without it the model guesses — and guessing means either never calling a tool
 // or calling the wrong one.
-func ToolGuidanceBlock() string {
-	return `<tool_guidance>
+func ToolGuidanceBlock(toolNames []string) string {
+	// No tools at all (a chat-only role, or the tool module switched off) means no
+	// guidance block: this inventory is the most expensive part of the prompt, and
+	// describing tools the model was not given only invites calls that cannot be
+	// satisfied.
+	if len(toolNames) == 0 {
+		return ""
+	}
+	allowed := make(map[string]bool, len(toolNames))
+	for _, n := range toolNames {
+		allowed[n] = true
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(toolGuidanceText, "\n") {
+		if name, ok := tableToolName(line); ok && !allowed[name] {
+			continue // a row for a tool this role was not given
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// tableToolName pulls the tool name out of an inventory row such as
+// "| calculator | 四则运算 | 任何需要算数的地方，不要心算 |". The header and the
+// separator row report ok=false and are kept verbatim.
+func tableToolName(line string) (string, bool) {
+	if !strings.HasPrefix(line, "| ") {
+		return "", false
+	}
+	cell := strings.TrimSpace(strings.SplitN(line, "|", 3)[1])
+	if cell == "" || cell == "工具" || strings.HasPrefix(cell, "---") {
+		return "", false
+	}
+	return cell, true
+}
+
+// toolGuidanceText is the unfiltered guidance block; ToolGuidanceBlock trims its
+// inventory to the tools the turn actually offers.
+const toolGuidanceText = `<tool_guidance>
 你可以使用以下内置工具来完成任务。按需调用，不要为了用工具而用工具——简单问题直接回答。
 
 ## 工具清单与选择策略
@@ -239,7 +280,6 @@ func ToolGuidanceBlock() string {
 
 **原则：图表是为了让复杂的事变简单，不是为了显得专业。如果文字能说清楚，就用文字。**
 </tool_guidance>`
-}
 
 // prompt. Like the knowledge block it is explicitly framed as context, not as
 // an instruction, so recalled content cannot silently outrank the role prompt —

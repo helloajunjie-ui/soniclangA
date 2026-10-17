@@ -1703,6 +1703,94 @@ func (h *Handler) memoriesConsolidate(w http.ResponseWriter, r *http.Request) {
 	h.json(w, 202, map[string]interface{}{"jobId": jobID, "type": consolidate.TypeConsolidate})
 }
 
+// consolidationDue reports whether enough new L1 facts have accumulated since the
+// last *completed* consolidation.
+//
+// The pipeline only ever ran when somebody pressed the button in the UI, so "自动
+// 巩固" never happened: L1 piled up and the L2 scenes / L3 persona stayed frozen at
+// whatever the last manual run produced. Counting facts newer than the last
+// successful run (rather than just "how many L1 exist") is what keeps the
+// scheduler from re-running forever on the same backlog — consolidation does not
+// consume L1 entries.
+func consolidationDue(l1 []*memory.Memory, jobs []job.JobStatus, minNew int) bool {
+	if minNew <= 0 {
+		minNew = 20
+	}
+	if len(l1) < 3 { // consolidate's own minimum
+		return false
+	}
+	var last int64
+	for _, st := range jobs {
+		if st.Type != consolidate.TypeConsolidate || st.Status != "done" {
+			continue
+		}
+		if st.UpdatedAt > last {
+			last = st.UpdatedAt
+		}
+	}
+	fresh := 0
+	for _, m := range l1 {
+		if m == nil || !m.Enabled || m.SupersededBy != "" {
+			continue
+		}
+		if last == 0 || m.CreatedAt > last {
+			fresh++
+		}
+	}
+	return fresh >= minNew
+}
+
+// AutoConsolidate runs the L1→L2→L3 pipeline in the background, at most once per
+// interval and only when consolidationDue says there is new material. Started by
+// main; it never returns, and the process exiting stops it.
+func (h *Handler) AutoConsolidate(interval time.Duration, minNew int) {
+	if h == nil || h.Jobs == nil || h.Memory == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Minute
+	}
+	if minNew <= 0 {
+		minNew = 20
+	}
+	for {
+		time.Sleep(interval)
+		h.consolidateIfDue(minNew)
+	}
+}
+
+// consolidateIfDue enqueues one consolidation when it is due, unless one is
+// already queued or running (two runs at once would double the LLM cost and race
+// on the same scene files).
+func (h *Handler) consolidateIfDue(minNew int) {
+	jobs := h.Jobs.List()
+	for _, st := range jobs {
+		if st.Type == consolidate.TypeConsolidate && (st.Status == "pending" || st.Status == "running") {
+			return
+		}
+	}
+	l1 := h.Memory.List(memory.ListFilter{Level: memory.LevelL1, Include: true})
+	if !consolidationDue(l1, jobs, minNew) {
+		return
+	}
+	pid, model, err := h.resolveChatTarget("", "")
+	if err != nil {
+		// No usable provider: nothing to consolidate with. Not an error worth
+		// shouting about on every tick.
+		h.log.Debugf("自动记忆巩固跳过：%v", err)
+		return
+	}
+	jobID := util.NewID()
+	payload, _ := json.Marshal(consolidate.Payload{
+		JobID: jobID, ProviderID: pid, Model: model, UpdateL3: true,
+	})
+	if _, err := h.Jobs.Submit(job.Job{ID: jobID, Type: consolidate.TypeConsolidate, Payload: payload}); err != nil {
+		h.log.Warnf("自动记忆巩固入队失败：%v", err)
+		return
+	}
+	h.log.Infof("自动记忆巩固已入队（%s），累计 %d 条 L1", jobID, len(l1))
+}
+
 // memoriesExtract runs L1 distillation on demand (bypasses only the cadence
 // gate; the input/output limits still apply).
 func (h *Handler) memoriesExtract(w http.ResponseWriter, r *http.Request) {

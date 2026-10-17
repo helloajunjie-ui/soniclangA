@@ -11,19 +11,51 @@ import (
 
 func TestAssembleEmpty(t *testing.T) {
 	got := Assemble(Context{})
-	// An empty context still carries the always-on infrastructure blocks:
-	// the real current time and the built-in tool guidance.
+	// An empty context still carries the always-on infrastructure block: the real
+	// current time.
 	if !strings.Contains(got, "当前时间") {
 		t.Fatalf("missing current-time block, got %q", got)
 	}
-	if !strings.Contains(got, "<tool_guidance>") {
-		t.Fatalf("missing tool-guidance block, got %q", got)
+	// No tools means no tool guidance: the inventory is the most expensive part of
+	// the prompt, and a context with no tools must not advertise any.
+	if strings.Contains(got, "<tool_guidance>") {
+		t.Fatalf("a context with no tools rendered the tool-guidance block: %q", got)
 	}
 	// But no persona / skills / memory blocks should appear from nothing.
 	for _, tag := range []string{"<persona>", "<skills>", "<memory_guidance>", "<methodology>"} {
 		if strings.Contains(got, tag) {
 			t.Fatalf("empty context should not render %s, got %q", tag, got)
 		}
+	}
+}
+
+// The inventory must list only the tools this turn offers: telling the model about
+// shell_exec when the role was given only calculator invites calls it cannot make.
+func TestToolGuidanceIsFilteredByAvailableTools(t *testing.T) {
+	got := ToolGuidanceBlock([]string{"calculator", "get_time"})
+	if got == "" {
+		t.Fatal("guidance vanished with tools available")
+	}
+	if !strings.Contains(got, "| calculator |") || !strings.Contains(got, "| get_time |") {
+		t.Errorf("the inventory is missing the available tools:\n%s", got)
+	}
+	for _, absent := range []string{"shell_exec", "control_list_apps", "web_search", "memory_search"} {
+		if strings.Contains(got, "| "+absent+" |") {
+			t.Errorf("the inventory still lists %s, which this turn does not offer", absent)
+		}
+	}
+	// The header and the separator row survive the filtering.
+	if !strings.Contains(got, "| 工具 | 用途 | 什么时候用 |") {
+		t.Error("the table header was filtered away")
+	}
+}
+
+func TestToolGuidanceIsEmptyWithoutTools(t *testing.T) {
+	if got := ToolGuidanceBlock(nil); got != "" {
+		t.Errorf("no tools should render no guidance, got %d bytes", len(got))
+	}
+	if got := ToolGuidanceBlock([]string{}); got != "" {
+		t.Errorf("no tools should render no guidance, got %d bytes", len(got))
 	}
 }
 

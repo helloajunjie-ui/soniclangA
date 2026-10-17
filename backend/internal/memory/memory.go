@@ -203,6 +203,15 @@ type Service struct {
 	scenes    map[string][]string // scene -> L1 memberIds
 	conflicts []Conflict
 	gate      map[string]int64 // conversation -> last extraction time
+	// hitsDirty holds the memories whose hit counters changed since the last
+	// flush. Saving them inline made every recall (i.e. every chat turn) perform
+	// one store write per hit, all under the service write lock; batching keeps
+	// the same correctness (the write happens under the lock, so a concurrent
+	// invalidate cannot be overwritten) at a fraction of the commits.
+	hitsDirty     map[string]struct{}
+	lastHitFlush  time.Time
+	hitFlushEvery time.Duration
+	hitFlushBatch int
 }
 
 type embeddingConfig struct {
@@ -233,6 +242,10 @@ func New(entities, indexes storage.Store, baseDir string,
 		cache:     map[string]Memory{},
 		scenes:    map[string][]string{},
 		gate:      map[string]int64{},
+
+		hitsDirty:     map[string]struct{}{},
+		hitFlushEvery: 30 * time.Second,
+		hitFlushBatch: 64,
 	}
 	_ = os.MkdirAll(filepath.Join(baseDir, "scenes"), 0o755)
 	_ = os.MkdirAll(filepath.Join(baseDir, "offload"), 0o755)
@@ -557,11 +570,45 @@ func (s *Service) Recall(query string, topK int, scope string) ([]RecallHit, err
 		cp.HitCount++
 		cp.LastHitAt = now
 		s.cache[h.ID] = cp
-		_ = s.entities.Save(cp.ID, cp)
+		s.hitsDirty[h.ID] = struct{}{}
 		out = append(out, RecallHit{Memory: &cp, Score: h.Score})
 	}
 	s.mu.Unlock()
+	// Persist the hit counters in batches (see flushHits). Recall stays read-shaped:
+	// the common path does no I/O at all, and the counters still land on disk.
+	s.flushHits()
 	return out, nil
+}
+
+// flushHits writes the memories whose hit counters changed since the last flush.
+//
+// The write happens under the service lock on purpose: saving a snapshot taken
+// earlier could resurrect a memory that was invalidated in between. Batching is
+// what keeps it cheap — the counters are ranking hints, so losing a few seconds
+// of them on a crash costs nothing, while doing one commit per hit made every
+// chat turn write to the database N times while holding the lock.
+func (s *Service) flushHits() {
+	s.mu.Lock()
+	if len(s.hitsDirty) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	if s.hitFlushEvery > 0 && time.Since(s.lastHitFlush) < s.hitFlushEvery && len(s.hitsDirty) < s.hitFlushBatch {
+		s.mu.Unlock()
+		return
+	}
+	pending := make([]Memory, 0, len(s.hitsDirty))
+	for id := range s.hitsDirty {
+		if m, ok := s.cache[id]; ok {
+			pending = append(pending, m)
+		}
+	}
+	s.hitsDirty = map[string]struct{}{}
+	s.lastHitFlush = time.Now()
+	for _, m := range pending {
+		_ = s.entities.Save(m.ID, m)
+	}
+	s.mu.Unlock()
 }
 
 // recallable reports whether this memory may be returned by recall. It is the
