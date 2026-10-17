@@ -2,34 +2,37 @@
 
 后端是 `backend/agenthub.exe`（内嵌前端，单文件）；本目录只负责托管窗口与托盘。
 
-## 分发方式（重要）
+## ⚠️ 必须放在纯英文路径下使用
 
-**不要用 NSIS 安装包。** electron-builder 的 NSIS 自解压桩（SFX）在含中文的路径下
-必失败，报：
+**不要**把本应用（或安装包）放在含中文、空格、日文等非 ASCII 字符的目录里，例如：
 
 ```
-NSIS Error
-Error writing temporary file. Make sure your temp folder is valid.
+✗ E:\刺客\agent-proxy\desktop\dist\           ← 中文目录
+✗ D:\我的软件\AgentHub\                        ← 中文目录
+✗ C:\Program Files (x86)\AgentHub\            ← 空格
+✓ C:\AgentHub\
+✓ D:\AgentHub\
+✓ C:\Users\<你>\AppData\Local\Programs\AgentHub\   （安装器默认位置，符合要求）
 ```
 
-实测同一台机器、同一个文件：
+原因（实测，同一台机器、同一个文件）：
 
 | 位置 | 结果 |
 |---|---|
-| `E:\刺客\agent-proxy\desktop\dist\AgentHub Setup 1.0.0.exe`（双击） | 报错 |
-| `C:\AgentHubDist\setup.exe`（同文件） | 静默安装成功 |
-| `dist\win-unpacked\AgentHub.exe` | 正常（无 SFX） |
-| `dist\AgentHub-1.0.0-win.zip` 解压后运行 | 正常（无 SFX） |
+| `E:\刺客\agent-proxy\desktop\dist\AgentHub Setup 1.0.0.exe`（双击） | `NSIS Error: Error writing temporary file` |
+| `E:\刺客\agent-proxy\desktop\dist\AgentHub 1.0.0.exe`（portable，同样 SFX） | 同上 |
+| 把同一个文件拷到 `C:\AgentHubDist\setup.exe` 再运行 | 安装成功 |
+| `C:\AgentHub\AgentHub.exe`（解压形态） | 正常 |
 
-与磁盘空间（C 盘 87 GB 空闲）、TEMP 可写性（实测写入 95 MB 成功）、环境变量（TEMP/TMP
-都在）都无关，**只跟路径里有没有非 ASCII 字符有关**。
+与磁盘空间（C 盘 87 GB 空闲）、TEMP 可写性（实测写入 95 MB 成功）、环境变量
+（TEMP/TMP 都在）都无关，**只跟路径中是否有非 ASCII 字符有关**：NSIS 自解压桩
+（SFX）无法处理非 ASCII 路径。
 
-所以交付用这两种：
+因此分发时：
 
-1. `dist\AgentHub-1.0.0-win.zip` —— 解压即用（推荐）；
-2. `dist\win-unpacked\` —— 整个目录拷走即可运行。
-
-NSIS 安装包只有在纯 ASCII 路径下运行才有意义，不随发布提供。
+1. 用 `AgentHub-1.0.0-win.zip`，让用户**解压到纯英文目录**再运行（推荐）；
+2. 或把 `win-unpacked\` 整个目录拷到纯英文目录；
+3. NSIS 安装包仅在纯 ASCII 路径下可用，不随发布提供。
 
 ## 开发运行
 
@@ -38,6 +41,10 @@ npm install
 Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 npx electron .
 ```
+
+> 开发目录本身是中文路径（本仓库）时，`electron .` 通常还能跑，但一旦出现
+> 「启动后没有窗口」「后端起不来」，先按上面的规则把产物移到纯英文目录复测，
+> 再怀疑代码。
 
 ## 打包
 
