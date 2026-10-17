@@ -37,6 +37,9 @@ type Server struct {
 	Name    string   `json:"name"`
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
+	// URL switches the server to the Streamable HTTP transport (a hosted MCP
+	// endpoint). When set, Command/Args are ignored.
+	URL string `json:"url,omitempty"`
 	// Env holds plain (non-secret) KEY=VALUE entries.
 	Env map[string]string `json:"env,omitempty"`
 	// SecretEnv holds the *masked* view of encrypted entries, for the UI. The
@@ -101,7 +104,7 @@ type Manager struct {
 
 	mu      sync.RWMutex
 	servers map[string]*Server
-	clients map[string]*Client
+	clients map[string]session
 	// tools maps "serverID/toolName" → the prefixed registry tool name, so a
 	// call can be routed back to the right server even when two servers expose
 	// the same tool name.
@@ -118,7 +121,7 @@ func NewManager(store storage.Store, vault *keyvault.Vault, reg *registry.Regist
 		store: store, vault: vault, reg: reg, aud: aud,
 		lifetime: lifetime, lifetimeEnd: lifetimeEnd,
 		servers: map[string]*Server{},
-		clients: map[string]*Client{},
+		clients: map[string]session{},
 		tools:   map[string]string{},
 	}
 	m.load()
@@ -328,7 +331,12 @@ func (m *Manager) Start(ctx context.Context, id string) (*Info, error) {
 	// the response is written — which would kill every MCP server a few
 	// milliseconds after it started. The manager owns the lifetime; Stop/StopAll
 	// release it.
-	cl, err := Start(m.lifetime, Config{Command: s.Command, Args: s.Args, Env: env, Dir: s.Dir})
+	var cl session
+	if s.URL != "" {
+		cl, err = startHTTP(m.lifetime, s.URL, env["MCP_TOKEN"])
+	} else {
+		cl, err = Start(m.lifetime, Config{Command: s.Command, Args: s.Args, Env: env, Dir: s.Dir})
+	}
 	if err != nil {
 		m.fail(id, err.Error())
 		return nil, err
