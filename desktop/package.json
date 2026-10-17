@@ -2,6 +2,7 @@
   "name": "agenthub-desktop",
   "productName": "AgentHub",
   "version": "1.0.0",
+  "author": "AgentHub",
   "description": "本地 LLM Agent 代理（桌面版）",
   "main": "main.js",
   "private": true,
@@ -20,7 +21,7 @@
     "extraResources": [
       { "from": "../backend/agenthub.exe", "to": "backend/agenthub.exe" }
     ],
-    "win": { "target": ["nsis"], "icon": "build/icon.ico" },
+    "win": { "target": ["nsis"], "icon": "build/icon.ico", "signAndEditExecutable": false },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
   }
 }
