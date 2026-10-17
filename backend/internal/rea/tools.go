@@ -107,8 +107,11 @@ func (saveTool) Schema() map[string]interface{} {
 			"name":       map[string]interface{}{"type": "string", "description": "显示名"},
 			"matchClass": map[string]interface{}{"type": "string", "description": "窗口类名或进程名"},
 			"matchTitle": map[string]interface{}{"type": "string", "description": "窗口标题片段"},
-			"probe":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "侦察结论，如「端口 8188 有 HTTP 响应」"},
-			"action":     map[string]interface{}{"type": "string", "description": "action 名，如 txt2img"},
+			"appVersion": map[string]interface{}{
+				"type": "string", "description": "录制时的软件版本；软件升级后界面变了就重录并更新它",
+			},
+			"probe":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "侦察结论，如「端口 8188 有 HTTP 响应」"},
+			"action": map[string]interface{}{"type": "string", "description": "action 名，如 txt2img"},
 			"description": map[string]interface{}{
 				"type": "string", "description": "这个 action 干什么",
 			},
@@ -136,6 +139,9 @@ func (t saveTool) Execute(_ context.Context, args map[string]interface{}) (strin
 	}
 	if v, ok := args["matchTitle"].(string); ok && v != "" {
 		p.MatchTitle = v
+	}
+	if v, ok := args["appVersion"].(string); ok && v != "" {
+		p.AppVersion = v
 	}
 	if v, ok := args["probe"].([]interface{}); ok {
 		for _, it := range v {
@@ -173,7 +179,15 @@ func (t saveTool) Execute(_ context.Context, args map[string]interface{}) (strin
 	if err := t.svc.Save(p); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("已保存 %s/%s（%d 步）。之后用 rea_plan 取步骤执行。", app, action, len(steps)), nil
+	return fmt.Sprintf("已保存 %s/%s（%d 步，rev %d，适配版本 %s）。之后用 rea_plan 取步骤执行。",
+		app, action, len(steps), p.Rev, orDash(p.AppVersion)), nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "未记录"
+	}
+	return s
 }
 
 // ---- rea_plan ----

@@ -49,9 +49,15 @@ type Profile struct {
 	MatchTitle string `json:"matchTitle,omitempty"` // window title substring
 	// Probe records what recon found, so the next session does not repeat it:
 	// "port 8188" beats "no API" for deciding whether to drive the GUI at all.
-	Probe     []string          `json:"probe,omitempty"`
-	Actions   map[string]Action `json:"actions"`
-	UpdatedAt int64             `json:"updatedAt"`
+	// AppVersion is the software version this adapter was recorded against.
+	AppVersion string            `json:"appVersion,omitempty"`
+	Probe      []string          `json:"probe,omitempty"`
+	Actions    map[string]Action `json:"actions"`
+	// Rev increments on every save; history keeps the previous revisions.
+	Rev int `json:"rev"`
+	// VerifiedAt is the last time an action was confirmed to work.
+	VerifiedAt int64 `json:"verifiedAt"`
+	UpdatedAt  int64 `json:"updatedAt"`
 }
 
 // Action is one parameterised operation, e.g. "txt2img" with a ${prompt} step.
@@ -112,8 +118,23 @@ func (s *Service) Get(app string) (*Profile, error) {
 	if !ok {
 		return nil, fmt.Errorf("没有 %q 的 REA 档案；先用 rea_save 录一份", app)
 	}
+	return cloneProfile(p), nil
+}
+
+// cloneProfile deep-copies a profile. The struct copy alone is not enough: Actions
+// is a map and Step slices are shared, so a caller editing a profile it "read"
+// would silently rewrite the cache — and the revision archived by the next Save
+// would hold the new content instead of the old one.
+func cloneProfile(p *Profile) *Profile {
 	cp := *p
-	return &cp, nil
+	cp.Probe = append([]string(nil), p.Probe...)
+	cp.Actions = make(map[string]Action, len(p.Actions))
+	for k, a := range p.Actions {
+		a.Steps = append([]Step(nil), a.Steps...)
+		a.Params = append([]string(nil), a.Params...)
+		cp.Actions[k] = a
+	}
+	return &cp
 }
 
 // Save stores a profile. App must be a plain id: it becomes a file name.
@@ -134,6 +155,21 @@ func (s *Service) Save(p *Profile) error {
 			}
 		}
 	}
+	// Archive the revision being replaced before writing the new one. Kept short on
+	// purpose: this is a history of "what changed when a release broke the
+	// adapter", not a version control system.
+	if prev, ok := s.cache[p.App]; ok {
+		_ = os.MkdirAll(filepath.Join(s.dir, "history", p.App), 0o755)
+		if b, err := json.MarshalIndent(prev, "", "  "); err == nil {
+			_ = os.WriteFile(filepath.Join(s.dir, "history", p.App, fmt.Sprintf("rev-%03d.json", prev.Rev)), b, 0o644)
+		}
+		p.Rev = prev.Rev + 1
+	} else {
+		p.Rev = 1
+	}
+	if p.VerifiedAt == 0 {
+		p.VerifiedAt = time.Now().UnixMilli()
+	}
 	p.UpdatedAt = time.Now().UnixMilli()
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
@@ -148,8 +184,7 @@ func (s *Service) Save(p *Profile) error {
 		return err
 	}
 	s.mu.Lock()
-	cp := *p
-	s.cache[p.App] = &cp
+	s.cache[p.App] = cloneProfile(p)
 	s.mu.Unlock()
 	return nil
 }

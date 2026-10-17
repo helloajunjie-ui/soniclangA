@@ -2,6 +2,8 @@ package rea
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -103,5 +105,40 @@ func TestRegisterToolsAddsThree(t *testing.T) {
 		if !names[want] {
 			t.Errorf("%s was not registered", want)
 		}
+	}
+}
+
+// The adapter is a product: it has to record which build it was made against, and
+// a re-record (after a UI change ships) must keep the previous revision on disk.
+func TestSaveTracksVersionAndArchivesRevisions(t *testing.T) {
+	dir := t.TempDir()
+	svc := New(dir)
+	ctx := context.Background()
+
+	for _, v := range []string{"1.0", "1.1"} {
+		if _, err := (saveTool{svc: svc}).Execute(ctx, map[string]interface{}{
+			"app": "comfy", "appVersion": v, "action": "queue",
+			"steps": []interface{}{map[string]interface{}{"op": "click", "target": "btn:" + v}},
+		}); err != nil {
+			t.Fatalf("save %s: %v", v, err)
+		}
+	}
+	p, err := svc.Get("comfy")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if p.AppVersion != "1.1" || p.Rev != 2 {
+		t.Errorf("version=%q rev=%d, want 1.1/2", p.AppVersion, p.Rev)
+	}
+	if p.VerifiedAt == 0 {
+		t.Error("VerifiedAt was not stamped")
+	}
+	// rev-001 holds the 1.0 recording.
+	hist, err := os.ReadFile(filepath.Join(dir, "history", "comfy", "rev-001.json"))
+	if err != nil {
+		t.Fatalf("history missing: %v", err)
+	}
+	if !strings.Contains(string(hist), `"1.0"`) || !strings.Contains(string(hist), "btn:1.0") {
+		t.Errorf("archived revision does not hold the old recording: %s", hist)
 	}
 }
